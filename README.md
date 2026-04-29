@@ -99,6 +99,19 @@ Latest GBP valuations:
 SELECT * FROM current_valuations ORDER BY src;
 ```
 
+## Tests
+
+Run the SQL test suite with:
+
+```sh
+tests/run.sh
+```
+
+The test runner creates a temporary PostgreSQL database, loads the schema,
+runs SQL assertions, and drops the database afterwards.  If the current user
+cannot connect directly but has passwordless sudo access to the `postgres`
+system user, the runner uses that automatically.
+
 ## Direct SQL Workflow
 
 The package assumes users are comfortable with SQL.  The normal workflow is:

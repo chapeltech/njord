@@ -9,6 +9,7 @@ DROP PROCEDURE IF EXISTS create_xaction_v;
 
 DROP VIEW IF EXISTS balance_sheet;
 DROP VIEW IF EXISTS balance_sheet_old;
+DROP VIEW IF EXISTS full_ledger;
 DROP VIEW IF EXISTS full_valuations;
 DROP VIEW IF EXISTS valuations_with_reciprocals;
 DROP VIEW IF EXISTS current_valuations;

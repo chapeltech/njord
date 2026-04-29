@@ -48,8 +48,7 @@
 ## Project Shape
 
 - Keep the core package SQL-only.
-- Add a small SQL test suite that can be run against a temporary PostgreSQL
-  database.
+- Expand the SQL test suite as accounting constraints are added.
 - Document each public procedure and report view in one place.
 - Avoid putting accounting correctness in future UI code; UI code should call
   SQL APIs and rely on database constraints.
