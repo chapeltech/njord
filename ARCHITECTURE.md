@@ -23,8 +23,12 @@ The schema is centered on a double-entry ledger:
   Each account belongs to exactly one book.
 - `cash_accounts` marks which asset accounts are cash or cash equivalents for
   Cash Flow reporting.
+- `vat_codes` and `expense_tax_treatments` define reusable VAT recovery and
+  Corporation Tax treatment policies for business expense reporting.
 - `xactions` stores transaction headers within a book.
 - `xaction_bits` stores transaction lines, each attached to one account.
+- `vendors`, `business_expenses`, and `business_expense_lines` attach business
+  expense metadata to normal ledger transactions and lines.
 - `xaction_unresolved` marks imported or incomplete transactions that still
   require classification or balancing.
 - `xaction_tags` stores user-defined tags for reporting and classification.
@@ -89,6 +93,23 @@ database constraints.
 All public mutation procedures take a `book_id` argument.  A future UI may
 select a default book for a user, but SQL calls should remain explicit about
 which book is being changed.
+
+## Business Expense Metadata
+
+Business expenses are not a second ledger.  They are annotations over
+ordinary `xactions` and `xaction_bits` rows.  The posting lines remain the
+accounting source of truth; expense metadata records vendor, invoice, business
+purpose, receipt, VAT recovery, and Corporation Tax treatment.
+
+Expense accounts may carry default VAT and tax treatment.  This supports
+fast entry for accounts such as `JAGUAR Expenses`, where most lines share the
+same VAT and tax behaviour.  `business_expense_lines` may override those
+defaults for real exceptions, such as insurance with no VAT or a lease cost
+with partial VAT recovery.
+
+Reports should compute effective treatment with line override first, account
+default second.  VAT recovery and Corporation Tax allowability are separate
+concepts and should remain separate fields.
 
 ## Reporting
 

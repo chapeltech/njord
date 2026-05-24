@@ -101,6 +101,80 @@ The `TRUE` argument marks the transaction resolved.  Imported or incomplete
 transactions should be marked unresolved until they are balanced and
 classified.
 
+## Business Expenses
+
+Business expense data is metadata over normal double-entry transactions.  The
+ledger remains the accounting truth; the extra tables record suppliers,
+invoice references, VAT treatment, Corporation Tax treatment, business
+purpose, and receipts.
+
+Expense accounts can carry default VAT and tax treatment:
+
+```sql
+INSERT INTO accts (
+    book_id, id, type, atype,
+    default_vat_code, default_tax_treatment
+) VALUES (
+    'business', 'JAGUAR Expenses', 'E', 'GBP',
+    'UK_STANDARD_BLOCKED', 'ALLOWABLE_REVENUE'
+);
+```
+
+Create the actual accounting entry as usual:
+
+```sql
+CALL create_xaction(
+    'business',
+    '2026-04-10',
+    TRUE,
+    ROW('Current Account', -24.00, 'JAGUAR car wash')::xaction_elem,
+    ROW('JAGUAR Expenses', 24.00, 'JAGUAR car wash')::xaction_elem
+);
+```
+
+Attach the business expense header to the transaction:
+
+```sql
+INSERT INTO vendors (book_id, id, name)
+VALUES ('business', 'sparkle-wash', 'Sparkle Wash Ltd');
+
+INSERT INTO business_expenses (
+    book_id, xid, vendor_id, invoice_number, invoice_date, business_purpose
+)
+SELECT book_id, xid, 'sparkle-wash', 'SW-100', '2026-04-10',
+       'Company car cleaning'
+FROM xactions
+WHERE book_id = 'business'
+  AND date = '2026-04-10'
+  AND comment = 'JAGUAR car wash';
+```
+
+Line-level rows are optional.  If a line has no override, reports use the
+account defaults.  Add a line override only for exceptions, such as insurance
+with no VAT:
+
+```sql
+INSERT INTO business_expense_lines (xaction_bit_id, vat_code, note)
+SELECT xaction_bits.id, 'NO_VAT', 'Insurance is VAT exempt/no VAT on invoice'
+FROM xaction_bits
+JOIN xactions
+  ON xactions.book_id = xaction_bits.book_id
+ AND xactions.xid = xaction_bits.xid
+WHERE xaction_bits.book_id = 'business'
+  AND xaction_bits.acct = 'JAGUAR Expenses'
+  AND xactions.comment = 'JAGUAR insurance';
+```
+
+Use `business_expense_detail` to see the effective treatment after defaults
+and overrides are applied:
+
+```sql
+SELECT *
+FROM business_expense_detail
+WHERE book_id = 'business'
+ORDER BY date, xid, account;
+```
+
 ## Reports
 
 Current balance sheet:

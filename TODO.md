@@ -40,6 +40,10 @@
 
 - Extend Profit & Loss with configurable subtotal categories.
 - Add UI support for marking cash and cash-equivalent accounts.
+- Add VAT return support from `business_expense_detail` and future sales
+  invoice metadata.
+- Add Corporation Tax adjustment reports for disallowable, capital, mixed-use,
+  and mileage-claim expense treatments.
 - Add date-range filtering to Trial Balance when we want period movement
   columns alongside ending balances.
 - Add date filters to General Journal.

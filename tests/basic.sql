@@ -44,6 +44,12 @@ SELECT pg_temp.assert_true(
 );
 
 SELECT pg_temp.assert_true(
+    'business expense reference data is loaded',
+    EXISTS (SELECT 1 FROM vat_codes WHERE id = 'UK_STANDARD_BLOCKED') AND
+    EXISTS (SELECT 1 FROM expense_tax_treatments WHERE id = 'ALLOWABLE_REVENUE')
+);
+
+SELECT pg_temp.assert_true(
     'currency reference data is loaded',
     EXISTS (SELECT 1 FROM asset WHERE id = 'GBP') AND
     EXISTS (SELECT 1 FROM asset WHERE id = 'USD')
@@ -400,6 +406,158 @@ SELECT pg_temp.assert_true(
 	FROM cf_report('personal', '2026-01-20', '2026-01-20')
 	WHERE row_kind = 'computed'
 	  AND account = 'Cash at End of Period'
+    )
+);
+
+INSERT INTO accts (
+    book_id,
+    id,
+    type,
+    atype,
+    default_vat_code,
+    default_tax_treatment
+) VALUES (
+    'personal',
+    'JAGUAR Expenses',
+    'E',
+    'GBP',
+    'UK_STANDARD_BLOCKED',
+    'ALLOWABLE_REVENUE'
+);
+
+INSERT INTO vendors (book_id, id, name, vat_number)
+VALUES ('personal', 'sparkle-wash', 'Sparkle Wash Ltd', 'GB123456789');
+
+CALL create_xaction_nc(
+    'personal',
+    '2026-01-25',
+    TRUE,
+    ROW('Current GBP', -24.00, 'JAGUAR car wash')::xaction_elem,
+    ROW('JAGUAR Expenses', 24.00, 'JAGUAR car wash')::xaction_elem
+);
+
+INSERT INTO business_expenses (
+    book_id,
+    xid,
+    vendor_id,
+    invoice_number,
+    invoice_date,
+    supply_date,
+    business_purpose,
+    receipt_uri
+)
+SELECT book_id,
+       xid,
+       'sparkle-wash',
+       'SW-100',
+       '2026-01-25',
+       '2026-01-25',
+       'Company car cleaning',
+       'receipts/sw-100.pdf'
+FROM xactions
+WHERE book_id = 'personal'
+  AND date = '2026-01-25'
+  AND comment = 'JAGUAR car wash';
+
+INSERT INTO business_expense_lines (xaction_bit_id)
+SELECT xaction_bits.id
+FROM xaction_bits
+JOIN xactions
+  ON xactions.book_id = xaction_bits.book_id
+ AND xactions.xid = xaction_bits.xid
+WHERE xaction_bits.book_id = 'personal'
+  AND xactions.date = '2026-01-25'
+  AND xaction_bits.acct = 'JAGUAR Expenses';
+
+SELECT pg_temp.assert_true(
+    'business expense detail inherits account tax defaults',
+    (
+	SELECT vendor_name = 'Sparkle Wash Ltd'
+	   AND invoice_number = 'SW-100'
+	   AND description = 'JAGUAR car wash'
+	   AND memo IS NULL
+	   AND vat_code = 'UK_STANDARD_BLOCKED'
+	   AND vat_rate = 0.2000
+	   AND vat_recoverable_rate = 0.0000
+	   AND tax_treatment = 'ALLOWABLE_REVENUE'
+	   AND business_use_percent = 1.0000
+	FROM business_expense_detail
+	WHERE book_id = 'personal'
+	  AND account = 'JAGUAR Expenses'
+	  AND invoice_number = 'SW-100'
+    )
+);
+
+CALL create_xaction_nc(
+    'personal',
+    '2026-01-26',
+    TRUE,
+    ROW('Current GBP', -800.00, 'JAGUAR insurance')::xaction_elem,
+    ROW('JAGUAR Expenses', 800.00, 'JAGUAR insurance')::xaction_elem
+);
+
+INSERT INTO business_expenses (book_id, xid, vendor_id, invoice_number)
+SELECT book_id, xid, NULL, 'INS-2026'
+FROM xactions
+WHERE book_id = 'personal'
+  AND date = '2026-01-26'
+  AND comment = 'JAGUAR insurance';
+
+INSERT INTO business_expense_lines (xaction_bit_id, vat_code, note)
+SELECT xaction_bits.id, 'NO_VAT', 'Insurance is VAT exempt/no VAT on invoice'
+FROM xaction_bits
+JOIN xactions
+  ON xactions.book_id = xaction_bits.book_id
+ AND xactions.xid = xaction_bits.xid
+WHERE xaction_bits.book_id = 'personal'
+  AND xactions.date = '2026-01-26'
+  AND xaction_bits.acct = 'JAGUAR Expenses';
+
+SELECT pg_temp.assert_true(
+    'business expense line overrides account VAT defaults',
+    (
+	SELECT vat_code = 'NO_VAT'
+	   AND vat_rate = 0.0000
+	   AND vat_recoverable_rate = 0.0000
+	   AND tax_treatment = 'ALLOWABLE_REVENUE'
+	FROM business_expense_detail
+	WHERE book_id = 'personal'
+	  AND account = 'JAGUAR Expenses'
+	  AND invoice_number = 'INS-2026'
+    )
+);
+
+DO $$
+DECLARE
+    jaguar_bit integer;
+BEGIN
+    SELECT xaction_bits.id
+    INTO jaguar_bit
+    FROM xaction_bits
+    JOIN xactions
+      ON xactions.book_id = xaction_bits.book_id
+     AND xactions.xid = xaction_bits.xid
+    WHERE xaction_bits.book_id = 'personal'
+      AND xactions.date = '2026-01-26'
+      AND xaction_bits.acct = 'Current GBP';
+
+    BEGIN
+	INSERT INTO business_expense_lines (xaction_bit_id, business_use_percent)
+	VALUES (jaguar_bit, 1.50);
+
+	RAISE EXCEPTION 'invalid business use percentage was allowed';
+    EXCEPTION WHEN check_violation THEN
+	NULL;
+    END;
+END;
+$$;
+
+SELECT pg_temp.assert_true(
+    'business expense line percentages are constrained',
+    NOT EXISTS (
+	SELECT 1
+	FROM business_expense_lines
+	WHERE business_use_percent > 1
     )
 );
 
