@@ -14,6 +14,7 @@ CREATE TYPE xaction_elem AS (
 );
 
 CREATE OR REPLACE PROCEDURE create_xaction_v(
+	book	 VARCHAR,
 	t	 TIMESTAMP,
 	resolved BOOLEAN,
 	xs	 XACTION_ELEM[])
@@ -22,40 +23,73 @@ AS $$
 DECLARE
 	ourxid	INTEGER;
 	x	xaction_elem;
+	tx_comment VARCHAR;
+	line_count INTEGER;
 BEGIN
-    INSERT INTO xactions (xid, date)
-	VALUES (DEFAULT, t)
+    line_count := COALESCE(array_length(xs, 1), 0);
+
+    IF line_count = 2 THEN
+	SELECT NULLIF(btrim(vendor), '')
+	INTO tx_comment
+	FROM unnest(xs)
+	WHERE vendor IS NOT NULL
+	  AND btrim(vendor) <> ''
+	LIMIT 1;
+    ELSE
+	SELECT CASE WHEN count(DISTINCT memo) = 1 THEN min(memo) END
+	INTO tx_comment
+	FROM (
+	    SELECT NULLIF(btrim(vendor), '') AS memo
+	    FROM unnest(xs)
+	) AS memos
+	WHERE memo IS NOT NULL;
+    END IF;
+
+    INSERT INTO xactions (book_id, xid, date, comment)
+	VALUES (book, DEFAULT, t, tx_comment)
 	RETURNING xid INTO ourxid;
     FOREACH x IN ARRAY xs LOOP
-	INSERT INTO xaction_bits (xid, acct, amt, comment)
-	       VALUES (ourxid, x.acct, x.amt, x.vendor);
+	INSERT INTO xaction_bits (book_id, xid, acct, amt, comment)
+	       VALUES (
+		   book,
+		   ourxid,
+		   x.acct,
+		   x.amt,
+		   CASE
+		       WHEN line_count = 2 THEN NULL
+		       WHEN NULLIF(btrim(x.vendor), '') = tx_comment THEN NULL
+		       ELSE NULLIF(btrim(x.vendor), '')
+		   END
+	       );
     END LOOP;
     IF NOT resolved THEN
-	RAISE NOTICE 'inserting unresolved xaction (%)', ourxid;
-	INSERT INTO xaction_unresolved VALUES (ourxid);
+	RAISE NOTICE 'inserting unresolved xaction (%:%)', book, ourxid;
+	INSERT INTO xaction_unresolved VALUES (book, ourxid);
     END IF;
 END;
 $$;
 
 CREATE OR REPLACE PROCEDURE create_xaction_nc(
+	book VARCHAR,
 	t TIMESTAMP,
 	resolved BOOLEAN,
 	VARIADIC xaction_bits XACTION_ELEM[])
 LANGUAGE plpgsql
 AS $$
 BEGIN
-    CALL create_xaction_v(t, resolved, xaction_bits);
+    CALL create_xaction_v(book, t, resolved, xaction_bits);
 END;
 $$;
 
 CREATE OR REPLACE PROCEDURE create_xaction(
+	book VARCHAR,
 	t TIMESTAMP,
 	resolved BOOLEAN,
 	VARIADIC xaction_bits XACTION_ELEM[])
 LANGUAGE plpgsql
 AS $$
 BEGIN
-    CALL create_xaction_v(t, resolved, xaction_bits);
+    CALL create_xaction_v(book, t, resolved, xaction_bits);
     COMMIT;
 END;
 $$;
@@ -72,6 +106,7 @@ $$;
 --         the constaints.
 
 CREATE OR REPLACE PROCEDURE create_simple_xaction(
+	book VARCHAR,
 	t TIMESTAMP,
 	acct1 VARCHAR,
 	acct2 VARCHAR,
@@ -81,13 +116,14 @@ AS $$
 DECLARE
 	ourxid INTEGER;
 BEGIN
-    CALL create_xaction(t, TRUE,
+    CALL create_xaction(book, t, TRUE,
 			ROW(acct1, amt, NULL),
 			ROW(acct2, -amt, NULL));
 END;
 $$;
 
 CREATE OR REPLACE PROCEDURE open_account (
+	book	VARCHAR,
 	acct	VARCHAR,
 	date	TIMESTAMP,
 	type	VARCHAR,
@@ -96,12 +132,13 @@ CREATE OR REPLACE PROCEDURE open_account (
 LANGUAGE plpgsql
 AS $$
 BEGIN
-    INSERT INTO accts VALUES (acct, type, atype);
-    CALL create_simple_xaction(date, acct, 'Opening Balance', amt);
+    INSERT INTO accts (book_id, id, type, atype) VALUES (book, acct, type, atype);
+    CALL create_simple_xaction(book, date, acct, 'Opening Balance', amt);
 END;
 $$;
 
 CREATE OR REPLACE PROCEDURE open_account_pretax (
+	book	VARCHAR,
 	acct	VARCHAR,
 	date	TIMESTAMP,
 	atype	VARCHAR,
@@ -109,8 +146,9 @@ CREATE OR REPLACE PROCEDURE open_account_pretax (
 LANGUAGE plpgsql
 AS $$
 BEGIN
-    INSERT INTO accts VALUES (acct, 'A', atype, 0.6);
-    CALL create_simple_xaction(date, acct, 'Opening Balance', amt);
+    INSERT INTO accts (book_id, id, type, atype, pretax)
+	VALUES (book, acct, 'A', atype, 0.6);
+    CALL create_simple_xaction(book, date, acct, 'Opening Balance', amt);
 END;
 $$;
 
@@ -122,7 +160,7 @@ $$;
 --         them later, perhaps heuristically, perhaps with human
 --         interaction...
 
-CREATE OR REPLACE PROCEDURE import_csv(acct1 VARCHAR)
+CREATE OR REPLACE PROCEDURE import_csv(book VARCHAR, acct1 VARCHAR)
 LANGUAGE plpgsql
 AS $$
 DECLARE
@@ -138,7 +176,7 @@ BEGIN
 		CAST(regexp_replace(amt, ',', '', 'g') AS NUMERIC) AS value
 	    FROM import
 	LOOP
-	    CALL create_xaction_nc(t, TRUE, ROW(acct1, value, v));
+	    CALL create_xaction_nc(book, t, TRUE, ROW(acct1, value, v));
 	END LOOP;
 END;
 $$;

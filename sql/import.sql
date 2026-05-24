@@ -10,5 +10,5 @@ CREATE TEMP TABLE import (
 );
 COPY import(date, vendor, amt) FROM STDIN DELIMITER ',' CSV;
 
-CALL import_csv(':INPUT_ACCOUNT', 'Expenses');
+CALL import_csv(:'INPUT_BOOK', :'INPUT_ACCOUNT');
 DROP TABLE import;

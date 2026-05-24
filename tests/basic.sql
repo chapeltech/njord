@@ -24,11 +24,22 @@ SELECT pg_temp.assert_true(
 );
 
 SELECT pg_temp.assert_true(
+    'default book is loaded',
+    EXISTS (
+	SELECT 1
+	FROM books
+	WHERE id = 'personal'
+	  AND reporting_asset = 'GBP'
+    )
+);
+
+SELECT pg_temp.assert_true(
     'standard accounts are loaded',
     (
 	SELECT count(*) = 3
 	FROM accts
-	WHERE id IN ('Opening Balance', 'Income', 'Expenses')
+	WHERE book_id = 'personal'
+	  AND id IN ('Opening Balance', 'Income', 'Expenses')
     )
 );
 
@@ -47,17 +58,47 @@ SELECT pg_temp.assert_true(
     )
 );
 
-INSERT INTO accts (id, type, atype)
-VALUES ('USD Expenses', 'E', 'USD');
+INSERT INTO accts (book_id, id, type, atype)
+VALUES ('personal', 'USD Expenses', 'E', 'USD');
 
-CALL open_account('Broker USD', '2026-01-01', 'A', 'USD', 123.20);
+CALL open_account('personal', 'Broker USD', '2026-01-01', 'A', 'USD', 123.20);
+CALL open_account('personal', 'Current GBP', '2026-01-01', 'A', 'GBP', 50.00);
+
+INSERT INTO cash_accounts (book_id, acct)
+VALUES ('personal', 'Current GBP');
+
+DO $$
+BEGIN
+    BEGIN
+	INSERT INTO cash_accounts (book_id, acct)
+	VALUES ('personal', 'Expenses');
+
+	RAISE EXCEPTION 'expense account was marked as cash';
+    EXCEPTION WHEN check_violation THEN
+	NULL;
+    END;
+END;
+$$;
+
+SELECT pg_temp.assert_true(
+    'cash accounts must be asset accounts',
+    NOT EXISTS (
+	SELECT 1
+	FROM cash_accounts
+	WHERE book_id = 'personal'
+	  AND acct = 'Expenses'
+    )
+);
 
 SELECT pg_temp.assert_true(
     'open_account creates the asset account',
     EXISTS (
 	SELECT 1
 	FROM accts
-	WHERE id = 'Broker USD' AND type = 'A' AND atype = 'USD'
+	WHERE book_id = 'personal'
+	  AND id = 'Broker USD'
+	  AND type = 'A'
+	  AND atype = 'USD'
     )
 );
 
@@ -66,20 +107,28 @@ SELECT pg_temp.assert_true(
     (
 	SELECT count(*) = 2 AND sum(amt) = 0
 	FROM xaction_bits
-	WHERE xid = (
+	WHERE book_id = 'personal'
+	  AND xid = (
 	    SELECT max(xid)
 	    FROM xactions
+	    WHERE book_id = 'personal'
 	)
     )
 );
 
-CALL create_simple_xaction('2026-01-15', 'Broker USD', 'USD Expenses', -23.20);
+CALL create_simple_xaction(
+    'personal',
+    '2026-01-15',
+    'Broker USD',
+    'USD Expenses',
+    -23.20
+);
 
 SELECT pg_temp.assert_true(
     'ledger reports account entries',
     (
 	SELECT count(*) = 2 AND sum(amt) = 100.00
-	FROM ledger('Broker USD')
+	FROM ledger('personal', 'Broker USD')
     )
 );
 
@@ -88,9 +137,35 @@ SELECT pg_temp.assert_true(
     (
 	SELECT runningtotal = 100.00
 	FROM full_ledger
-	WHERE acct = 'Broker USD'
+	WHERE book_id = 'personal'
+	  AND acct = 'Broker USD'
 	ORDER BY date DESC, xid DESC
 	LIMIT 1
+    )
+);
+
+SELECT pg_temp.assert_true(
+    'general_journal reports debit and credit lines',
+    EXISTS (
+	SELECT 1
+	FROM general_journal
+	WHERE book_id = 'personal'
+	  AND date = '2026-01-15'
+	  AND account = 'USD Expenses'
+	  AND line_order = 1
+	  AND debit = 23.20
+	  AND credit IS NULL
+	  AND memo IS NULL
+    ) AND EXISTS (
+	SELECT 1
+	FROM general_journal
+	WHERE book_id = 'personal'
+	  AND date = '2026-01-15'
+	  AND account = 'Broker USD'
+	  AND line_order = 2
+	  AND debit IS NULL
+	  AND credit = 23.20
+	  AND memo IS NULL
     )
 );
 
@@ -99,7 +174,8 @@ SELECT pg_temp.assert_true(
     (
 	SELECT posttax = 81.17
 	FROM balance_sheet
-	WHERE account = 'Broker USD'
+	WHERE book_id = 'personal'
+	  AND account = 'Broker USD'
     )
 );
 
@@ -107,12 +183,256 @@ SELECT pg_temp.assert_true(
     'bsheet reports balances as of a date',
     (
 	SELECT posttax = 81.17
-	FROM bsheet('2026-01-31')
+	FROM bsheet('personal', '2026-01-31')
 	WHERE account = 'Broker USD'
     )
 );
 
+SELECT pg_temp.assert_true(
+    'balance_sheet_report values reporting-currency assets',
+    (
+	SELECT posttax = 50.00
+	FROM balance_sheet_report
+	WHERE book_id = 'personal'
+	  AND section = 'Assets'
+	  AND row_kind = 'account'
+	  AND account = 'Current GBP'
+    )
+);
+
+SELECT pg_temp.assert_true(
+    'balance_sheet_report includes balance sheet totals',
+    EXISTS (
+	SELECT 1
+	FROM balance_sheet_report
+	WHERE book_id = 'personal'
+	  AND row_kind = 'section_total'
+	  AND account = 'Total Assets'
+    ) AND EXISTS (
+	SELECT 1
+	FROM balance_sheet_report
+	WHERE book_id = 'personal'
+	  AND row_kind = 'grand_total'
+	  AND account = 'Total Liabilities and Equity'
+    )
+);
+
+SELECT pg_temp.assert_true(
+    'bsheet_report reports as-of sections',
+    EXISTS (
+	SELECT 1
+	FROM bsheet_report('personal', '2026-01-31')
+	WHERE section = 'Assets'
+	  AND row_kind = 'section_total'
+	  AND account = 'Total Assets'
+    )
+);
+
+CALL create_simple_xaction(
+    'personal',
+    '2026-01-20',
+    'Current GBP',
+    'Income',
+    100.00
+);
+
+CALL create_simple_xaction(
+    'personal',
+    '2026-01-21',
+    'Current GBP',
+    'Expenses',
+    -30.00
+);
+
+SELECT pg_temp.assert_true(
+    'trial_balance_report exposes reporting-currency differences',
+    (
+	SELECT debit = 250.00 AND credit = 273.20
+	FROM trial_balance_report
+	WHERE book_id = 'personal'
+	  AND row_kind = 'total'
+	  AND account = 'Total'
+    ) AND (
+	SELECT debit = 23.20 AND credit IS NULL
+	FROM trial_balance_report
+	WHERE book_id = 'personal'
+	  AND row_kind = 'difference'
+	  AND account = 'Difference'
+    )
+);
+
+SELECT pg_temp.assert_true(
+    'tb_report reports as-of differences',
+    (
+	SELECT debit = 150.00 AND credit = 173.20
+	FROM tb_report('personal', '2026-01-15')
+	WHERE row_kind = 'total'
+	  AND account = 'Total'
+    ) AND (
+	SELECT debit = 23.20 AND credit IS NULL
+	FROM tb_report('personal', '2026-01-15')
+	WHERE row_kind = 'difference'
+	  AND account = 'Difference'
+    )
+);
+
+INSERT INTO books (id, name, reporting_asset)
+VALUES ('trial', 'Trial Balance Test', 'GBP');
+
+INSERT INTO accts (book_id, id, type, atype)
+VALUES
+    ('trial', 'Opening Balance', 'Q', 'GBP'),
+    ('trial', 'Income', 'I', 'GBP');
+
+CALL open_account('trial', 'Cash', '2026-01-01', 'A', 'GBP', 100.00);
+
+CALL create_simple_xaction(
+    'trial',
+    '2026-01-02',
+    'Cash',
+    'Income',
+    50.00
+);
+
+SELECT pg_temp.assert_true(
+    'trial_balance_report balances same-currency books',
+    (
+	SELECT debit = 150.00 AND credit = 150.00
+	FROM trial_balance_report
+	WHERE book_id = 'trial'
+	  AND row_kind = 'total'
+	  AND account = 'Total'
+    ) AND NOT EXISTS (
+	SELECT 1
+	FROM trial_balance_report
+	WHERE book_id = 'trial'
+	  AND row_kind = 'difference'
+    )
+);
+
+SELECT pg_temp.assert_true(
+    'profit_loss_report includes income and expense totals',
+    EXISTS (
+	SELECT 1
+	FROM profit_loss_report
+	WHERE book_id = 'personal'
+	  AND section = 'Income'
+	  AND row_kind = 'section_total'
+	  AND account = 'Total Income'
+	  AND posttax = 100.00
+    ) AND EXISTS (
+	SELECT 1
+	FROM profit_loss_report
+	WHERE book_id = 'personal'
+	  AND section = 'Expenses'
+	  AND row_kind = 'section_total'
+	  AND account = 'Total Expenses'
+	  AND posttax = 48.83
+    )
+);
+
+SELECT pg_temp.assert_true(
+    'profit_loss_report reports net profit',
+    (
+	SELECT posttax = 51.17
+	FROM profit_loss_report
+	WHERE book_id = 'personal'
+	  AND row_kind = 'grand_total'
+	  AND account = 'Net Profit'
+    )
+);
+
+SELECT pg_temp.assert_true(
+    'pl_report reports a bounded period',
+    (
+	SELECT posttax = 100.00
+	FROM pl_report('personal', '2026-01-20', '2026-01-20')
+	WHERE section = 'Income'
+	  AND row_kind = 'section_total'
+	  AND account = 'Total Income'
+    )
+);
+
+SELECT pg_temp.assert_true(
+    'cash_flow_report classifies operating cash flow',
+    (
+	SELECT posttax = 70.00
+	FROM cash_flow_report
+	WHERE book_id = 'personal'
+	  AND section = 'Operating Activities'
+	  AND row_kind = 'section_total'
+	  AND account = 'Net Cash from Operating Activities'
+    )
+);
+
+SELECT pg_temp.assert_true(
+    'cash_flow_report classifies financing cash flow',
+    (
+	SELECT posttax = 50.00
+	FROM cash_flow_report
+	WHERE book_id = 'personal'
+	  AND section = 'Financing Activities'
+	  AND row_kind = 'section_total'
+	  AND account = 'Net Cash from Financing Activities'
+    )
+);
+
+SELECT pg_temp.assert_true(
+    'cash_flow_report reconciles ending cash',
+    (
+	SELECT posttax = 120.00
+	FROM cash_flow_report
+	WHERE book_id = 'personal'
+	  AND row_kind = 'computed'
+	  AND account = 'Cash at End of Period'
+    )
+);
+
+SELECT pg_temp.assert_true(
+    'cf_report reports bounded cash reconciliation',
+    (
+	SELECT posttax = 50.00
+	FROM cf_report('personal', '2026-01-20', '2026-01-20')
+	WHERE row_kind = 'computed'
+	  AND account = 'Cash at Beginning of Period'
+    ) AND (
+	SELECT posttax = 150.00
+	FROM cf_report('personal', '2026-01-20', '2026-01-20')
+	WHERE row_kind = 'computed'
+	  AND account = 'Cash at End of Period'
+    )
+);
+
+CALL create_xaction_nc(
+    'personal',
+    '2026-02-03',
+    TRUE,
+    ROW('Broker USD', -5.00, 'Two-line description')::xaction_elem,
+    ROW('USD Expenses', 5.00, 'Two-line description')::xaction_elem
+);
+
+SELECT pg_temp.assert_true(
+    'two-line transaction comments are stored on the header',
+    EXISTS (
+	SELECT 1
+	FROM xactions
+	WHERE book_id = 'personal'
+	  AND date = '2026-02-03'
+	  AND comment = 'Two-line description'
+    ) AND NOT EXISTS (
+	SELECT 1
+	FROM xaction_bits
+	JOIN xactions
+	  ON xactions.book_id = xaction_bits.book_id
+	 AND xactions.xid = xaction_bits.xid
+	WHERE xactions.book_id = 'personal'
+	  AND xactions.date = '2026-02-03'
+	  AND xaction_bits.comment IS NOT NULL
+    )
+);
+
 CALL create_xaction(
+    'personal',
     '2026-02-01',
     FALSE,
     ROW('Broker USD', -10.00, 'Unmatched row')::xaction_elem
@@ -123,6 +443,86 @@ SELECT pg_temp.assert_true(
     (
 	SELECT count(*) = 1
 	FROM xaction_unresolved
+	WHERE book_id = 'personal'
+    )
+);
+
+DO $$
+BEGIN
+    BEGIN
+	CALL create_xaction_nc(
+	    'personal',
+	    '2026-02-02',
+	    TRUE,
+	    ROW('Broker USD', 1.00, 'same-account debit')::xaction_elem,
+	    ROW('Broker USD', -1.00, 'same-account credit')::xaction_elem
+	);
+
+	RAISE EXCEPTION 'same-account transaction was allowed';
+    EXCEPTION WHEN unique_violation THEN
+	NULL;
+    END;
+END;
+$$;
+
+SELECT pg_temp.assert_true(
+    'transaction lines cannot reuse an account',
+    NOT EXISTS (
+	SELECT 1
+	FROM xactions
+	WHERE book_id = 'personal'
+	  AND date = '2026-02-02'
+    )
+);
+
+INSERT INTO books (id, name, reporting_asset)
+VALUES ('business', 'Business', 'GBP');
+
+INSERT INTO accts (book_id, id, type, atype)
+VALUES
+    ('business', 'Opening Balance', 'Q', 'GBP'),
+    ('business', 'Broker USD', 'A', 'USD'),
+    ('business', 'Business Expense', 'E', 'USD');
+
+SELECT pg_temp.assert_true(
+    'account names are scoped by book',
+    (
+	SELECT count(*) = 2
+	FROM accts
+	WHERE id = 'Broker USD'
+    )
+);
+
+DO $$
+DECLARE
+    ourxid integer;
+BEGIN
+    INSERT INTO xactions (book_id, date)
+    VALUES ('personal', '2026-02-02')
+    RETURNING xid INTO ourxid;
+
+    BEGIN
+	INSERT INTO xaction_bits (book_id, xid, acct, amt)
+	VALUES ('personal', ourxid, 'Business Expense', 1.00);
+
+	RAISE EXCEPTION 'cross-book account reference was allowed';
+    EXCEPTION WHEN foreign_key_violation THEN
+	NULL;
+    END;
+
+    DELETE FROM xactions
+    WHERE book_id = 'personal'
+      AND xid = ourxid;
+END;
+$$;
+
+SELECT pg_temp.assert_true(
+    'transaction lines cannot reference accounts from another book',
+    NOT EXISTS (
+	SELECT 1
+	FROM xaction_bits
+	WHERE book_id = 'personal'
+	  AND acct = 'Business Expense'
     )
 );
 
@@ -137,15 +537,20 @@ VALUES
     ('2026-02-05', 'Coffee', '-3.50'),
     ('2026-02-06', 'Refund', '1.25');
 
-CALL import_csv('Broker USD');
+CALL import_csv('personal', 'Broker USD');
 
 SELECT pg_temp.assert_true(
     'import_csv creates ledger lines from staging rows',
     (
 	SELECT count(*) = 2
 	FROM xaction_bits
-	WHERE acct = 'Broker USD'
-	  AND comment IN ('Coffee', 'Refund')
+	JOIN xactions
+	  ON xactions.book_id = xaction_bits.book_id
+	 AND xactions.xid = xaction_bits.xid
+	WHERE xaction_bits.book_id = 'personal'
+	  AND acct = 'Broker USD'
+	  AND xactions.comment IN ('Coffee', 'Refund')
+	  AND xaction_bits.comment IS NULL
     )
 );
 

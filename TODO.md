@@ -3,7 +3,7 @@
 ## Accounting Constraints
 
 - Add a deferred constraint trigger that rejects any resolved transaction
-  whose lines do not sum to zero per asset.
+  whose lines do not sum to zero per book and per asset.
 - Make CSV imports create unresolved transactions instead of resolved
   one-sided transactions.
 - Add an audit view for unbalanced transactions.
@@ -38,12 +38,17 @@
 
 ## Reporting
 
-- Add income statement reports by date range.
-- Add cash-flow reports by date range.
+- Extend Profit & Loss with configurable subtotal categories.
+- Add UI support for marking cash and cash-equivalent accounts.
+- Add date-range filtering to Trial Balance when we want period movement
+  columns alongside ending balances.
+- Add date filters to General Journal.
 - Add account register reports with running balances and counterparty account
   summaries.
 - Add tag-based spending reports.
 - Add expected income/yield reports for accounts and assets.
+- Decide whether common reports should require a book argument or expose
+  multi-book views plus book-filtered helper functions.
 
 ## Project Shape
 

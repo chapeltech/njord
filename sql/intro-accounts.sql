@@ -17,6 +17,11 @@ INSERT INTO acct_types VALUES ('Q');	-- Equity
 --
 -- Income and expense accounts:
 
-INSERT INTO accts VALUES ('Opening Balance',	'Q', 'GBP');
-INSERT INTO accts VALUES ('Income',		'I', 'GBP');
-INSERT INTO accts VALUES ('Expenses',		'E', 'GBP');
+INSERT INTO books VALUES ('personal', 'Personal', 'GBP');
+
+INSERT INTO accts (book_id, id, type, atype)
+	VALUES ('personal', 'Opening Balance',	'Q', 'GBP');
+INSERT INTO accts (book_id, id, type, atype)
+	VALUES ('personal', 'Income',		'I', 'GBP');
+INSERT INTO accts (book_id, id, type, atype)
+	VALUES ('personal', 'Expenses',		'E', 'GBP');

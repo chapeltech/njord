@@ -1,4 +1,8 @@
 DROP FUNCTION IF EXISTS bsheet;
+DROP FUNCTION IF EXISTS bsheet_report;
+DROP FUNCTION IF EXISTS tb_report;
+DROP FUNCTION IF EXISTS pl_report;
+DROP FUNCTION IF EXISTS cf_report;
 DROP FUNCTION IF EXISTS ledger;
 
 DROP PROCEDURE IF EXISTS open_account;
@@ -8,6 +12,11 @@ DROP PROCEDURE IF EXISTS create_xaction_nc;
 DROP PROCEDURE IF EXISTS create_xaction_v;
 
 DROP VIEW IF EXISTS balance_sheet;
+DROP VIEW IF EXISTS balance_sheet_report;
+DROP VIEW IF EXISTS trial_balance_report;
+DROP VIEW IF EXISTS profit_loss_report;
+DROP VIEW IF EXISTS cash_flow_report;
+DROP VIEW IF EXISTS general_journal;
 DROP VIEW IF EXISTS balance_sheet_old;
 DROP VIEW IF EXISTS full_ledger;
 DROP VIEW IF EXISTS full_valuations;
@@ -19,10 +28,14 @@ DROP TABLE IF EXISTS xaction_tags;
 DROP TABLE IF EXISTS xaction_unresolved;
 DROP TABLE IF EXISTS xaction_bits;
 DROP TABLE IF EXISTS xactions;
+DROP TABLE IF EXISTS cash_accounts;
 DROP TABLE IF EXISTS accts;
+DROP TABLE IF EXISTS books;
 DROP TABLE IF EXISTS acct_types;
 DROP TABLE IF EXISTS valuations;
 DROP TABLE IF EXISTS asset;
+
+DROP FUNCTION IF EXISTS ensure_cash_account_is_asset;
 
 DROP TYPE IF EXISTS xaction_elem;
 
