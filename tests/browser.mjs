@@ -27,6 +27,11 @@ try {
   await page.goto(base, { waitUntil: "networkidle" });
   await waitUntilReady();
   assert(await page.getByLabel("Book").locator('option[value=""]').count() === 1, "book navigation has no empty-state option");
+  const navigationLabels = await page.locator(".topbar .nav-field > span").allTextContents();
+  assert(
+    JSON.stringify(navigationLabels) === JSON.stringify(["Book", "Report", "Account"]),
+    `navigation order is ${navigationLabels.join(" -> ")} instead of Book -> Report -> Account`,
+  );
 
   // Shell and ledger page, including details and SQL-backed normalization.
   await page.getByLabel("Book").selectOption("web-test");
@@ -78,7 +83,7 @@ try {
   await page.locator(".status-line").getByText("Loading report", { exact: true }).waitFor();
   assert(!(await page.getByLabel("Book").isDisabled()), "book navigation is locked by a pending page request");
   assert(!(await page.getByLabel("Report").isDisabled()), "report navigation is locked by a pending page request");
-  assert(await page.getByLabel("Account").isDisabled(), "account navigation exposes stale choices while a page is loading");
+  assert(await page.getByLabel("Account").count() === 0, "a book-level report exposes an irrelevant account selector");
   await page.getByLabel("Report").selectOption("ledger");
   await waitUntilReady();
   await page.getByRole("heading", { name: "Account ledger" }).waitFor();
@@ -154,6 +159,7 @@ try {
     const reportPanel = panel(heading);
     await reportPanel.getByRole("heading", { name: heading }).waitFor();
     await reportPanel.locator("tbody tr").first().waitFor();
+    assert(await page.getByLabel("Account").count() === 0, `${heading} exposes an irrelevant account selector`);
     if (value === "general-journal") {
       const journalAppearance = await reportPanel.locator(".general-journal-table").evaluate((table) => {
         const firstLine = table.querySelector("tbody .journal-first-line");

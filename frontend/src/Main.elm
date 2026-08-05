@@ -53,6 +53,7 @@ type alias Account =
 type alias ReportOption =
     { id : String
     , name : String
+    , usesAccount : Bool
     }
 
 
@@ -1263,10 +1264,14 @@ viewNavigation model =
         [ Html.div [ Attr.class "brand" ] [ Html.h1 [] [ Html.text "Plutus" ] ]
         , selectControl model.navigationLocked "Book" (Maybe.withDefault "" model.selectedBook) SelectBook
             (( "", "Select book" ) :: List.map (\book -> ( book.id, book.name )) model.books ++ [ ( addBookValue, "Add book…" ) ])
-        , selectControl (model.navigationLocked || model.loading) "Account" (Maybe.withDefault "" model.selectedAccount) SelectAccount
-            (( "", "Select account" ) :: List.map (\account -> ( account.id, account.id )) model.accounts ++ [ ( addAccountValue, "Add account…" ) ])
         , selectControl model.navigationLocked "Report" (reportIdForPage model.page) SelectReport
             (List.map (\report -> ( report.id, report.name )) model.reportOptions)
+        , if selectedReportUsesAccount model then
+            selectControl (model.navigationLocked || model.loading) "Account" (Maybe.withDefault "" model.selectedAccount) SelectAccount
+                (( "", "Select account" ) :: List.map (\account -> ( account.id, account.id )) model.accounts ++ [ ( addAccountValue, "Add account…" ) ])
+
+          else
+            Html.text ""
         , Html.div [ Attr.class "status-line" ]
             [ Html.span [ Attr.classList [ ( "busy", model.loading ) ] ] [ Html.text model.status ] ]
         ]
@@ -1295,6 +1300,15 @@ reportIdForPage page =
         ProfitLossPage -> "profit-loss"
         CashFlowPage -> "cash-flow"
         _ -> "ledger"
+
+
+selectedReportUsesAccount : Model -> Bool
+selectedReportUsesAccount model =
+    model.reportOptions
+        |> List.filter (\report -> report.id == reportIdForPage model.page)
+        |> List.head
+        |> Maybe.map .usesAccount
+        |> Maybe.withDefault False
 
 
 viewPage : Model -> Html Msg
@@ -1813,9 +1827,10 @@ accountDecoder =
 
 reportOptionDecoder : Decoder ReportOption
 reportOptionDecoder =
-    Decode.map2 ReportOption
+    Decode.map3 ReportOption
         (Decode.field "id" Decode.string)
         (Decode.field "name" Decode.string)
+        (Decode.field "uses_account" Decode.bool)
 
 
 transactionLineDecoder : Decoder TransactionLine
