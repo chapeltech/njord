@@ -65,6 +65,26 @@ try {
   assert(ledgerAppearance.greenBackground === "rgb(191, 222, 185)", "ledger green transaction band is missing");
   assert(ledgerAppearance.yellowBackground === "rgb(255, 239, 152)", "ledger yellow transaction band is missing");
   assert(ledgerAppearance.cellWhiteSpace === "nowrap", "ledger cells no longer resist wrapping");
+
+  // A page RPC that never answers must not trap the entire application. Keep
+  // Book and Report available, cancel the stale request, and accept only the
+  // response belonging to the latest selection.
+  let stalledBalanceRoute;
+  const stallBalanceSheet = (route) => {
+    stalledBalanceRoute = route;
+  };
+  await page.route("**/rpc/balance_sheet_page", stallBalanceSheet);
+  await page.getByLabel("Report").selectOption("balance-sheet");
+  await page.locator(".status-line").getByText("Loading report", { exact: true }).waitFor();
+  assert(!(await page.getByLabel("Book").isDisabled()), "book navigation is locked by a pending page request");
+  assert(!(await page.getByLabel("Report").isDisabled()), "report navigation is locked by a pending page request");
+  assert(await page.getByLabel("Account").isDisabled(), "account navigation exposes stale choices while a page is loading");
+  await page.getByLabel("Report").selectOption("ledger");
+  await waitUntilReady();
+  await page.getByRole("heading", { name: "Account ledger" }).waitFor();
+  if (stalledBalanceRoute) await stalledBalanceRoute.abort().catch(() => {});
+  await page.unroute("**/rpc/balance_sheet_page", stallBalanceSheet);
+
   const originalRow = page.locator("tr").filter({ hasText: "Line updated" });
   await originalRow.getByRole("button", { name: "Details" }).click();
   await page.getByRole("cell", { name: "Food", exact: true }).first().waitFor();

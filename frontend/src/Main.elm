@@ -14,7 +14,7 @@ import String
 main : Program () Model Msg
 main =
     Browser.element
-        { init = \_ -> ( initialModel, loadShell )
+        { init = \_ -> startPageRequest loadShell initialModel
         , update = update
         , subscriptions = \_ -> Sub.none
         , view = view
@@ -216,6 +216,9 @@ type alias Model =
     , expandedTransactions : List Int
     , pageValidation : List String
     , loading : Bool
+    , navigationLocked : Bool
+    , nextPageRequestId : Int
+    , activePageRequestId : Maybe Int
     , status : String
     }
 
@@ -258,6 +261,9 @@ initialModel =
     , expandedTransactions = []
     , pageValidation = []
     , loading = True
+    , navigationLocked = False
+    , nextPageRequestId = 1
+    , activePageRequestId = Nothing
     , status = "Loading"
     }
 
@@ -268,7 +274,7 @@ emptyDraft key =
 
 
 type Msg
-    = GotPage Page (Maybe String) (Result Http.Error (List Component))
+    = GotPage Int Page (Maybe String) (Result Http.Error (List Component))
     | SelectBook String
     | SelectAccount String
     | SelectReport String
@@ -314,38 +320,61 @@ type Msg
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
-        GotPage requestedPage requestedAccount result ->
-            case result of
-                Err err ->
-                    ( httpError err model, Cmd.none )
+        GotPage requestId requestedPage requestedAccount result ->
+            if model.activePageRequestId /= Just requestId then
+                ( model, Cmd.none )
 
-                Ok components ->
-                    let
-                        next =
-                            applyPage requestedPage components model
+            else
+                case result of
+                    Err err ->
+                        ( httpError err model, Cmd.none )
 
-                        selectedBook =
-                            next.selectedBook
+                    Ok components ->
+                        let
+                            next =
+                                applyPage requestedPage components model
 
-                        firstAccount =
-                            List.head next.accounts |> Maybe.map .id
-                    in
-                    case ( selectedBook, firstAccount ) of
-                        ( Just bookId, Just accountId ) ->
-                            if requestedPage == ShellPage || (requestedPage == LedgerPage && requestedAccount == Nothing) then
-                                ( { next | selectedAccount = Just accountId, loading = True }
-                                , loadLedger bookId accountId
+                            selectedBook =
+                                next.selectedBook
+
+                            firstAccount =
+                                List.head next.accounts |> Maybe.map .id
+                        in
+                        case ( selectedBook, firstAccount ) of
+                            ( Just bookId, Just accountId ) ->
+                                if requestedPage == ShellPage || (requestedPage == LedgerPage && requestedAccount == Nothing) then
+                                    startPageRequest
+                                        (\nextRequestId -> loadLedger nextRequestId bookId accountId)
+                                        { next
+                                            | page = LedgerPage
+                                            , selectedAccount = Just accountId
+                                            , loading = True
+                                            , navigationLocked = False
+                                        }
+
+                                else
+                                    ( { next
+                                        | loading = False
+                                        , navigationLocked = False
+                                        , activePageRequestId = Nothing
+                                        , status = "Ready"
+                                      }
+                                    , Cmd.none
+                                    )
+
+                            _ ->
+                                ( { next
+                                    | loading = False
+                                    , navigationLocked = False
+                                    , activePageRequestId = Nothing
+                                    , status = "Ready"
+                                  }
+                                , Cmd.none
                                 )
-
-                            else
-                                ( { next | loading = False, status = "Ready" }, Cmd.none )
-
-                        _ ->
-                            ( { next | loading = False, status = "Ready" }, Cmd.none )
 
         SelectBook raw ->
             if raw == addBookValue then
-                ( loadingModel AddBookPage "Loading add-book page" model, loadAddBookPage )
+                startPageRequest loadAddBookPage (loadingModel AddBookPage "Loading add-book page" model)
 
             else
                 let
@@ -365,17 +394,17 @@ update msg model =
                             , preview = Nothing
                         }
                 in
-                ( loadingModel nextPage "Loading book" next
-                , loadCurrentPage nextPage raw Nothing next
-                )
+                startPageRequest
+                    (\requestId -> loadCurrentPage requestId nextPage raw Nothing next)
+                    (loadingModel nextPage "Loading book" next)
 
         SelectAccount raw ->
             if raw == addAccountValue then
                 case model.selectedBook of
                     Just bookId ->
-                        ( loadingModel AddAccountPage "Loading add-account page" model
-                        , loadAddAccountPage bookId
-                        )
+                        startPageRequest
+                            (\requestId -> loadAddAccountPage requestId bookId)
+                            (loadingModel AddAccountPage "Loading add-account page" model)
 
                     Nothing ->
                         ( { model | status = "Select a book first" }, Cmd.none )
@@ -383,9 +412,9 @@ update msg model =
             else
                 case model.selectedBook of
                     Just bookId ->
-                        ( loadingModel LedgerPage "Loading ledger" { model | selectedAccount = Just raw }
-                        , loadLedger bookId raw
-                        )
+                        startPageRequest
+                            (\requestId -> loadLedger requestId bookId raw)
+                            (loadingModel LedgerPage "Loading ledger" { model | selectedAccount = Just raw })
 
                     Nothing ->
                         ( model, Cmd.none )
@@ -400,9 +429,9 @@ update msg model =
                         nextPage =
                             pageFromReport reportId
                     in
-                    ( loadingModel nextPage "Loading report" model
-                    , loadCurrentPage nextPage bookId model.selectedAccount model
-                    )
+                    startPageRequest
+                        (\requestId -> loadCurrentPage requestId nextPage bookId model.selectedAccount model)
+                        (loadingModel nextPage "Loading report" model)
 
         UpdateReportDate value ->
             ( { model | reportDate = value, pageValidation = [] }, Cmd.none )
@@ -416,9 +445,9 @@ update msg model =
         RefreshReport ->
             case model.selectedBook of
                 Just bookId ->
-                    ( loadingModel model.page "Refreshing report" model
-                    , loadCurrentPage model.page bookId model.selectedAccount model
-                    )
+                    startPageRequest
+                        (\requestId -> loadCurrentPage requestId model.page bookId model.selectedAccount model)
+                        (loadingModel model.page "Refreshing report" model)
 
                 Nothing ->
                     ( model, Cmd.none )
@@ -433,7 +462,7 @@ update msg model =
             ( { model | bookAssetInput = value }, Cmd.none )
 
         SubmitBook ->
-            ( { model | loading = True, status = "Creating book" }, createBook model )
+            ( { model | loading = True, navigationLocked = True, status = "Creating book" }, createBook model )
 
         BookCreated result ->
             case result |> Result.andThen firstResult of
@@ -441,9 +470,15 @@ update msg model =
                     ( httpError err model, Cmd.none )
 
                 Ok book ->
-                    ( { model | selectedBook = Just book.id, selectedAccount = Nothing, loading = True }
-                    , loadLedger book.id ""
-                    )
+                    startPageRequest
+                        (\requestId -> loadLedger requestId book.id "")
+                        { model
+                            | page = LedgerPage
+                            , selectedBook = Just book.id
+                            , selectedAccount = Nothing
+                            , loading = True
+                            , navigationLocked = False
+                        }
 
         UpdateAccountId value ->
             ( { model | accountIdInput = value }, Cmd.none )
@@ -466,7 +501,7 @@ update msg model =
         SubmitAccount ->
             case model.selectedBook of
                 Just bookId ->
-                    ( { model | loading = True, status = "Creating account" }
+                    ( { model | loading = True, navigationLocked = True, status = "Creating account" }
                     , createAccount bookId model
                     )
 
@@ -479,9 +514,14 @@ update msg model =
                     ( httpError err model, Cmd.none )
 
                 Ok account ->
-                    ( { model | selectedAccount = Just account.id, loading = True }
-                    , loadLedger account.bookId account.id
-                    )
+                    startPageRequest
+                        (\requestId -> loadLedger requestId account.bookId account.id)
+                        { model
+                            | page = LedgerPage
+                            , selectedAccount = Just account.id
+                            , loading = True
+                            , navigationLocked = False
+                        }
 
         NewTransaction ->
             ( resetTransactionEditor model, Cmd.none )
@@ -546,7 +586,7 @@ update msg model =
         PreviewTransaction ->
             case model.selectedBook of
                 Just bookId ->
-                    ( { model | loading = True, status = "Checking transaction" }
+                    ( { model | loading = True, navigationLocked = True, status = "Checking transaction" }
                     , previewTransaction bookId model
                     )
 
@@ -559,14 +599,14 @@ update msg model =
                     ( httpError err model, Cmd.none )
 
                 Ok preview ->
-                    ( { model | preview = Just preview, loading = False, status = "Preview updated" }
+                    ( { model | preview = Just preview, loading = False, navigationLocked = False, status = "Preview updated" }
                     , Cmd.none
                     )
 
         SubmitTransaction ->
             case model.selectedBook of
                 Just bookId ->
-                    ( { model | loading = True, status = "Saving transaction" }
+                    ( { model | loading = True, navigationLocked = True, status = "Saving transaction" }
                     , saveTransaction bookId model
                     )
 
@@ -607,7 +647,7 @@ update msg model =
         SaveLedgerEdit ->
             case ( model.selectedBook, model.ledgerEdit ) of
                 ( Just bookId, Just edit ) ->
-                    ( { model | loading = True, status = "Saving ledger line" }
+                    ( { model | loading = True, navigationLocked = True, status = "Saving ledger line" }
                     , updateLedgerLine bookId edit
                     )
 
@@ -632,7 +672,60 @@ update msg model =
 
 loadingModel : Page -> String -> Model -> Model
 loadingModel page status model =
-    { model | page = page, loading = True, status = status }
+    { model | page = page, loading = True, navigationLocked = False, status = status }
+
+
+startPageRequest : (Int -> Cmd Msg) -> Model -> ( Model, Cmd Msg )
+startPageRequest request model =
+    let
+        requestId =
+            model.nextPageRequestId
+
+        prepared =
+            clearPageRows model.page model
+
+        cancelPrevious =
+            model.activePageRequestId
+                |> Maybe.map (pageRequestTracker >> Http.cancel)
+                |> Maybe.withDefault Cmd.none
+    in
+    ( { prepared
+        | nextPageRequestId = requestId + 1
+        , activePageRequestId = Just requestId
+        , pageValidation = []
+      }
+    , Cmd.batch [ cancelPrevious, request requestId ]
+    )
+
+
+pageRequestTracker : Int -> String
+pageRequestTracker requestId =
+    "plutus-page-" ++ String.fromInt requestId
+
+
+clearPageRows : Page -> Model -> Model
+clearPageRows page model =
+    case page of
+        LedgerPage ->
+            { model | ledger = [] }
+
+        GeneralJournalPage ->
+            { model | journal = [] }
+
+        BalanceSheetPage ->
+            { model | reportRows = [] }
+
+        TrialBalancePage ->
+            { model | trialRows = [] }
+
+        ProfitLossPage ->
+            { model | reportRows = [] }
+
+        CashFlowPage ->
+            { model | reportRows = [] }
+
+        _ ->
+            model
 
 
 invalidatePreview : Model -> Model
@@ -674,10 +767,24 @@ reloadLedger : String -> Model -> ( Model, Cmd Msg )
 reloadLedger status model =
     case ( model.selectedBook, model.selectedAccount ) of
         ( Just bookId, Just accountId ) ->
-            ( { model | loading = True, status = status }, loadLedger bookId accountId )
+            startPageRequest
+                (\requestId -> loadLedger requestId bookId accountId)
+                { model
+                    | page = LedgerPage
+                    , loading = True
+                    , navigationLocked = False
+                    , status = status
+                }
 
         _ ->
-            ( { model | loading = False, status = status }, Cmd.none )
+            ( { model
+                | loading = False
+                , navigationLocked = False
+                , activePageRequestId = Nothing
+                , status = status
+              }
+            , Cmd.none
+            )
 
 
 firstResult : List a -> Result Http.Error a
@@ -692,7 +799,12 @@ firstResult rows =
 
 httpError : Http.Error -> Model -> Model
 httpError err model =
-    { model | loading = False, status = errorToString err }
+    { model
+        | loading = False
+        , navigationLocked = False
+        , activePageRequestId = Nothing
+        , status = errorToString err
+    }
 
 
 applyPage : Page -> List Component -> Model -> Model
@@ -893,45 +1005,45 @@ pageFromReport reportId =
         _ -> LedgerPage
 
 
-loadCurrentPage : Page -> String -> Maybe String -> Model -> Cmd Msg
-loadCurrentPage page bookId accountId model =
+loadCurrentPage : Int -> Page -> String -> Maybe String -> Model -> Cmd Msg
+loadCurrentPage requestId page bookId accountId model =
     case page of
         LedgerPage ->
-            loadLedger bookId (Maybe.withDefault "" accountId)
+            loadLedger requestId bookId (Maybe.withDefault "" accountId)
 
         GeneralJournalPage ->
-            loadGeneralJournal bookId
+            loadGeneralJournal requestId bookId
 
         BalanceSheetPage ->
-            loadBalanceSheet bookId model.reportDate
+            loadBalanceSheet requestId bookId model.reportDate
 
         TrialBalancePage ->
-            loadTrialBalance bookId model.reportDate
+            loadTrialBalance requestId bookId model.reportDate
 
         ProfitLossPage ->
-            loadProfitLoss bookId model.reportFrom model.reportTo
+            loadProfitLoss requestId bookId model.reportFrom model.reportTo
 
         CashFlowPage ->
-            loadCashFlow bookId model.reportFrom model.reportTo
+            loadCashFlow requestId bookId model.reportFrom model.reportTo
 
         AddAccountPage ->
-            loadAddAccountPage bookId
+            loadAddAccountPage requestId bookId
 
         AddBookPage ->
-            loadAddBookPage
+            loadAddBookPage requestId
 
         ShellPage ->
-            loadShell
+            loadShell requestId
 
 
-loadShell : Cmd Msg
-loadShell =
-    pageRpc ShellPage Nothing "shell_page" (Encode.object [])
+loadShell : Int -> Cmd Msg
+loadShell requestId =
+    pageRpc requestId ShellPage Nothing "shell_page" (Encode.object [])
 
 
-loadLedger : String -> String -> Cmd Msg
-loadLedger bookId accountId =
-    pageRpc LedgerPage (nonBlankMaybe accountId) "ledger_page"
+loadLedger : Int -> String -> String -> Cmd Msg
+loadLedger requestId bookId accountId =
+    pageRpc requestId LedgerPage (nonBlankMaybe accountId) "ledger_page"
         (Encode.object
             [ ( "p_book_id", Encode.string bookId )
             , ( "p_account_id", Encode.string accountId )
@@ -939,15 +1051,15 @@ loadLedger bookId accountId =
         )
 
 
-loadGeneralJournal : String -> Cmd Msg
-loadGeneralJournal bookId =
-    pageRpc GeneralJournalPage Nothing "general_journal_page"
+loadGeneralJournal : Int -> String -> Cmd Msg
+loadGeneralJournal requestId bookId =
+    pageRpc requestId GeneralJournalPage Nothing "general_journal_page"
         (Encode.object [ ( "p_book_id", Encode.string bookId ) ])
 
 
-loadBalanceSheet : String -> String -> Cmd Msg
-loadBalanceSheet bookId asOf =
-    pageRpc BalanceSheetPage Nothing "balance_sheet_page"
+loadBalanceSheet : Int -> String -> String -> Cmd Msg
+loadBalanceSheet requestId bookId asOf =
+    pageRpc requestId BalanceSheetPage Nothing "balance_sheet_page"
         (Encode.object
             [ ( "p_book_id", Encode.string bookId )
             , ( "p_as_of", optionalEncodeString asOf )
@@ -955,9 +1067,9 @@ loadBalanceSheet bookId asOf =
         )
 
 
-loadTrialBalance : String -> String -> Cmd Msg
-loadTrialBalance bookId asOf =
-    pageRpc TrialBalancePage Nothing "trial_balance_page"
+loadTrialBalance : Int -> String -> String -> Cmd Msg
+loadTrialBalance requestId bookId asOf =
+    pageRpc requestId TrialBalancePage Nothing "trial_balance_page"
         (Encode.object
             [ ( "p_book_id", Encode.string bookId )
             , ( "p_as_of", optionalEncodeString asOf )
@@ -965,9 +1077,9 @@ loadTrialBalance bookId asOf =
         )
 
 
-loadProfitLoss : String -> String -> String -> Cmd Msg
-loadProfitLoss bookId fromDate toDate =
-    pageRpc ProfitLossPage Nothing "profit_loss_page"
+loadProfitLoss : Int -> String -> String -> String -> Cmd Msg
+loadProfitLoss requestId bookId fromDate toDate =
+    pageRpc requestId ProfitLossPage Nothing "profit_loss_page"
         (Encode.object
             [ ( "p_book_id", Encode.string bookId )
             , ( "p_from", optionalEncodeString fromDate )
@@ -976,9 +1088,9 @@ loadProfitLoss bookId fromDate toDate =
         )
 
 
-loadCashFlow : String -> String -> String -> Cmd Msg
-loadCashFlow bookId fromDate toDate =
-    pageRpc CashFlowPage Nothing "cash_flow_page"
+loadCashFlow : Int -> String -> String -> String -> Cmd Msg
+loadCashFlow requestId bookId fromDate toDate =
+    pageRpc requestId CashFlowPage Nothing "cash_flow_page"
         (Encode.object
             [ ( "p_book_id", Encode.string bookId )
             , ( "p_from", optionalEncodeString fromDate )
@@ -987,20 +1099,25 @@ loadCashFlow bookId fromDate toDate =
         )
 
 
-loadAddBookPage : Cmd Msg
-loadAddBookPage =
-    pageRpc AddBookPage Nothing "add_book_page" (Encode.object [])
+loadAddBookPage : Int -> Cmd Msg
+loadAddBookPage requestId =
+    pageRpc requestId AddBookPage Nothing "add_book_page" (Encode.object [])
 
 
-loadAddAccountPage : String -> Cmd Msg
-loadAddAccountPage bookId =
-    pageRpc AddAccountPage Nothing "add_account_page"
+loadAddAccountPage : Int -> String -> Cmd Msg
+loadAddAccountPage requestId bookId =
+    pageRpc requestId AddAccountPage Nothing "add_account_page"
         (Encode.object [ ( "p_book_id", Encode.string bookId ) ])
 
 
-pageRpc : Page -> Maybe String -> String -> Encode.Value -> Cmd Msg
-pageRpc page requestedAccount functionName body =
-    rpc functionName body componentListDecoder (GotPage page requestedAccount)
+pageRpc : Int -> Page -> Maybe String -> String -> Encode.Value -> Cmd Msg
+pageRpc requestId page requestedAccount functionName body =
+    rpcWithTracker
+        (Just (pageRequestTracker requestId))
+        functionName
+        body
+        componentListDecoder
+        (GotPage requestId page requestedAccount)
 
 
 createBook : Model -> Cmd Msg
@@ -1116,10 +1233,19 @@ optionalEncodeString value =
 
 rpc : String -> Encode.Value -> Decoder a -> (Result Http.Error a -> msg) -> Cmd msg
 rpc functionName body decoder toMsg =
-    Http.post
-        { url = "/rpc/" ++ functionName
+    rpcWithTracker Nothing functionName body decoder toMsg
+
+
+rpcWithTracker : Maybe String -> String -> Encode.Value -> Decoder a -> (Result Http.Error a -> msg) -> Cmd msg
+rpcWithTracker tracker functionName body decoder toMsg =
+    Http.request
+        { method = "POST"
+        , headers = []
+        , url = "/rpc/" ++ functionName
         , body = Http.jsonBody body
         , expect = expectJsonDetailed toMsg decoder
+        , timeout = Just 30000
+        , tracker = tracker
         }
 
 
@@ -1135,11 +1261,11 @@ viewNavigation : Model -> Html Msg
 viewNavigation model =
     Html.header [ Attr.class "topbar" ]
         [ Html.div [ Attr.class "brand" ] [ Html.h1 [] [ Html.text "Plutus" ] ]
-        , selectControl model.loading "Book" (Maybe.withDefault "" model.selectedBook) SelectBook
+        , selectControl model.navigationLocked "Book" (Maybe.withDefault "" model.selectedBook) SelectBook
             (( "", "Select book" ) :: List.map (\book -> ( book.id, book.name )) model.books ++ [ ( addBookValue, "Add book…" ) ])
-        , selectControl model.loading "Account" (Maybe.withDefault "" model.selectedAccount) SelectAccount
+        , selectControl (model.navigationLocked || model.loading) "Account" (Maybe.withDefault "" model.selectedAccount) SelectAccount
             (( "", "Select account" ) :: List.map (\account -> ( account.id, account.id )) model.accounts ++ [ ( addAccountValue, "Add account…" ) ])
-        , selectControl model.loading "Report" (reportIdForPage model.page) SelectReport
+        , selectControl model.navigationLocked "Report" (reportIdForPage model.page) SelectReport
             (List.map (\report -> ( report.id, report.name )) model.reportOptions)
         , Html.div [ Attr.class "status-line" ]
             [ Html.span [ Attr.classList [ ( "busy", model.loading ) ] ] [ Html.text model.status ] ]
