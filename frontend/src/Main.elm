@@ -1203,20 +1203,20 @@ viewReadyPage model =
 viewLedger : Model -> Html Msg
 viewLedger model =
     Html.div [ Attr.class "ledger-page" ]
-        [ Html.section [ Attr.class "panel" ]
+        [ Html.section [ Attr.class "panel ledger-panel" ]
             [ sectionHeader "Account ledger" (Html.button [ Attr.type_ "button", Events.onClick NewTransaction ] [ Html.text "New transaction" ])
             , viewValidationMessages model.pageValidation
-            , Html.table [ Attr.class "ledger-table" ]
+            , Html.table [ Attr.class "ledger-table ledger-register" ]
                 [ Html.thead []
                     [ Html.tr []
-                        [ Html.th [] [ Html.text "Date" ]
-                        , Html.th [] [ Html.text "XID" ]
-                        , Html.th [] [ Html.text "Description" ]
-                        , Html.th [] [ Html.text "Transfer" ]
-                        , Html.th [] [ Html.text "R" ]
-                        , Html.th [ Attr.class "number" ] [ Html.text "Amount" ]
-                        , Html.th [ Attr.class "number" ] [ Html.text "Balance" ]
-                        , Html.th [] [ Html.text "Actions" ]
+                        [ Html.th [ Attr.class "ledger-date" ] [ Html.text "Date" ]
+                        , Html.th [ Attr.class "ledger-xid" ] [ Html.text "XID" ]
+                        , Html.th [ Attr.class "ledger-description" ] [ Html.text "Description" ]
+                        , Html.th [ Attr.class "ledger-transfer" ] [ Html.text "Transfer" ]
+                        , Html.th [ Attr.class "ledger-reconciled" ] [ Html.text "R" ]
+                        , Html.th [ Attr.class "number ledger-amount" ] [ Html.text "Amount" ]
+                        , Html.th [ Attr.class "number ledger-balance" ] [ Html.text "Balance" ]
+                        , Html.th [ Attr.class "ledger-actions" ] [ Html.text "Actions" ]
                         ]
                     ]
                 , Html.tbody [] (List.concatMap (viewLedgerEntry model) model.ledger)
@@ -1230,24 +1230,49 @@ viewLedger model =
 viewLedgerEntry : Model -> LedgerEntry -> List (Html Msg)
 viewLedgerEntry model entry =
     let
+        expanded =
+            List.member entry.xid model.expandedTransactions
+
+        selected =
+            model.transactionXid == Just entry.xid
+                || (model.ledgerEdit |> Maybe.map .xid) == Just entry.xid
+
         mainRow =
-            Html.tr []
-                [ Html.td [] [ Html.text entry.date ]
-                , Html.td [] [ Html.text (String.fromInt entry.xid) ]
-                , Html.td [] [ Html.text (Maybe.withDefault "" entry.description) ]
-                , Html.td [] [ Html.text (Maybe.withDefault (if entry.split then "Split" else "") entry.transfer) ]
-                , Html.td [] [ Html.text (if entry.reconciled then "R" else "") ]
-                , Html.td [ Attr.class "number" ] [ Html.text (money entry.amount) ]
-                , Html.td [ Attr.class "number" ] [ Html.text (money entry.balance) ]
+            Html.tr
+                [ Attr.classList
+                    [ ( "ledger-line", True )
+                    , ( "ledger-line-green", modBy 2 entry.xid == 0 )
+                    , ( "ledger-line-yellow", modBy 2 entry.xid /= 0 )
+                    , ( "ledger-row-unresolved", not entry.reconciled )
+                    , ( "ledger-row-selected", selected )
+                    ]
+                ]
+                [ Html.td [ Attr.class "ledger-date" ] [ Html.text entry.date ]
+                , Html.td [ Attr.class "ledger-xid" ] [ Html.text (String.fromInt entry.xid) ]
+                , Html.td [ Attr.class "ledger-description" ] [ Html.text (Maybe.withDefault "" entry.description) ]
+                , Html.td [ Attr.class "ledger-transfer" ] [ Html.text (Maybe.withDefault (if entry.split then "Split" else "") entry.transfer) ]
+                , Html.td [ Attr.class "ledger-reconciled" ]
+                    [ Html.span
+                        [ Attr.classList
+                            [ ( "status-badge", True )
+                            , ( "status-resolved", entry.reconciled )
+                            , ( "status-unresolved", not entry.reconciled )
+                            ]
+                        , Attr.title (if entry.reconciled then "Resolved" else "Unresolved")
+                        ]
+                        [ Html.text (if entry.reconciled then "R" else "U") ]
+                    ]
+                , Html.td [ Attr.class "number ledger-amount" ] [ Html.text (money entry.amount) ]
+                , Html.td [ Attr.class "number ledger-balance" ] [ Html.text (money entry.balance) ]
                 , Html.td [ Attr.class "row-action" ]
                     [ Html.button [ Attr.type_ "button", Events.onClick (BeginLedgerEdit entry) ] [ Html.text "Line" ]
                     , Html.button [ Attr.type_ "button", Events.onClick (EditTransaction entry) ] [ Html.text "Transaction" ]
-                    , Html.button [ Attr.type_ "button", Events.onClick (ToggleTransaction entry.xid) ] [ Html.text "Details" ]
+                    , Html.button [ Attr.type_ "button", Events.onClick (ToggleTransaction entry.xid) ] [ Html.text (if expanded then "Hide" else "Details") ]
                     ]
                 ]
 
         detailRows =
-            if List.member entry.xid model.expandedTransactions then
+            if expanded then
                 List.map viewTransactionLine entry.lines
 
             else
@@ -1259,14 +1284,14 @@ viewLedgerEntry model entry =
 viewTransactionLine : TransactionLine -> Html Msg
 viewTransactionLine line =
     Html.tr [ Attr.class "ledger-split-line" ]
-        [ Html.td [] []
-        , Html.td [] []
-        , Html.td [] [ Html.text (Maybe.withDefault "" line.comment) ]
-        , Html.td [] [ Html.text line.account ]
-        , Html.td [] []
-        , Html.td [ Attr.class "number" ] [ Html.text (money line.amount) ]
-        , Html.td [] []
-        , Html.td [] []
+        [ Html.td [ Attr.class "ledger-date split-empty-date" ] []
+        , Html.td [ Attr.class "ledger-xid" ] []
+        , Html.td [ Attr.class "ledger-description" ] [ Html.text (Maybe.withDefault "" line.comment) ]
+        , Html.td [ Attr.class "ledger-transfer" ] [ Html.text line.account ]
+        , Html.td [ Attr.class "ledger-reconciled" ] []
+        , Html.td [ Attr.class "number ledger-amount" ] [ Html.text (money line.amount) ]
+        , Html.td [ Attr.class "number ledger-balance" ] []
+        , Html.td [ Attr.class "ledger-actions" ] []
         ]
 
 
@@ -1277,7 +1302,7 @@ viewLedgerEdit model =
             Html.text ""
 
         Just edit ->
-            Html.section [ Attr.class "panel narrow-page" ]
+            Html.section [ Attr.class "panel narrow-page ledger-edit-panel" ]
                 [ sectionHeader ("Edit ledger line " ++ String.fromInt edit.xid) (Html.text "")
                 , Html.div [ Attr.class "form" ]
                     [ inputField "Date" "date" edit.date UpdateLedgerEditDate
@@ -1289,7 +1314,13 @@ viewLedgerEdit model =
 
 viewTransactionEditor : Model -> Html Msg
 viewTransactionEditor model =
-    Html.section [ Attr.class "panel" ]
+    Html.section
+        [ Attr.classList
+            [ ( "panel", True )
+            , ( "transaction-editor", True )
+            , ( "transaction-editor-active", model.transactionXid /= Nothing )
+            ]
+        ]
         [ sectionHeader
             (case model.transactionXid of
                 Just xid -> "Edit transaction " ++ String.fromInt xid
@@ -1319,7 +1350,7 @@ viewTransactionEditor model =
 
 viewDraftLine : List Account -> DraftLine -> Html Msg
 viewDraftLine accounts line =
-    Html.tr []
+    Html.tr [ Attr.class "transaction-draft-row" ]
         [ Html.td []
             [ Html.select [ Attr.value line.account, Events.onInput (UpdateDraftAccount line.key) ]
                 (Html.option [ Attr.value "", Attr.selected (line.account == "") ] [ Html.text "Select account" ]
@@ -1403,11 +1434,11 @@ normalizedLineText line =
 
 viewJournal : Model -> Html Msg
 viewJournal model =
-    Html.section [ Attr.class "panel" ]
+    Html.section [ Attr.class "panel journal-panel" ]
         [ sectionHeader "General Journal" (Html.text "")
         , viewValidationMessages model.pageValidation
-        , Html.table [ Attr.class "data-table" ]
-            [ Html.thead [] [ Html.tr [] [ Html.th [] [ Html.text "Date" ], Html.th [] [ Html.text "XID" ], Html.th [] [ Html.text "Description" ], Html.th [] [ Html.text "Account" ], Html.th [] [ Html.text "Memo" ], Html.th [ Attr.class "number" ] [ Html.text "Debit" ], Html.th [ Attr.class "number" ] [ Html.text "Credit" ] ] ]
+        , Html.table [ Attr.class "data-table general-journal-table" ]
+            [ Html.thead [] [ Html.tr [] [ Html.th [ Attr.class "journal-date" ] [ Html.text "Date" ], Html.th [ Attr.class "journal-xid" ] [ Html.text "XID" ], Html.th [ Attr.class "journal-description" ] [ Html.text "Description" ], Html.th [ Attr.class "journal-reconciled" ] [ Html.text "R" ], Html.th [ Attr.class "journal-account" ] [ Html.text "Account" ], Html.th [ Attr.class "journal-memo" ] [ Html.text "Memo" ], Html.th [ Attr.class "number journal-debit" ] [ Html.text "Debit" ], Html.th [ Attr.class "number journal-credit" ] [ Html.text "Credit" ] ] ]
             , Html.tbody [] (List.map viewJournalRow model.journal)
             ]
         ]
@@ -1415,14 +1446,22 @@ viewJournal model =
 
 viewJournalRow : JournalRow -> Html Msg
 viewJournalRow row =
-    Html.tr []
-        [ Html.td [] [ Html.text (if row.lineOrder == 1 then row.date else "") ]
-        , Html.td [] [ Html.text (if row.lineOrder == 1 then String.fromInt row.xid else "") ]
-        , Html.td [] [ Html.text (if row.lineOrder == 1 then Maybe.withDefault "" row.description else "") ]
-        , Html.td [] [ Html.text row.account ]
-        , Html.td [] [ Html.text (Maybe.withDefault "" row.memo) ]
-        , Html.td [ Attr.class "number" ] [ Html.text (maybeMoney row.debit) ]
-        , Html.td [ Attr.class "number" ] [ Html.text (maybeMoney row.credit) ]
+    Html.tr
+        [ Attr.classList
+            [ ( "journal-group-even", modBy 2 row.xid == 0 )
+            , ( "journal-group-odd", modBy 2 row.xid /= 0 )
+            , ( "journal-first-line", row.lineOrder == 1 )
+            , ( "journal-unresolved", not row.reconciled )
+            ]
+        ]
+        [ Html.td [ Attr.class "journal-date" ] [ Html.text (if row.lineOrder == 1 then row.date else "") ]
+        , Html.td [ Attr.class "journal-xid" ] [ Html.text (if row.lineOrder == 1 then String.fromInt row.xid else "") ]
+        , Html.td [ Attr.class "journal-description" ] [ Html.text (if row.lineOrder == 1 then Maybe.withDefault "" row.description else "") ]
+        , Html.td [ Attr.class "journal-reconciled" ] [ Html.text (if row.lineOrder == 1 then (if row.reconciled then "R" else "U") else "") ]
+        , Html.td [ Attr.classList [ ( "journal-account", True ), ( "journal-credit-account", row.credit /= Nothing ) ] ] [ Html.text row.account ]
+        , Html.td [ Attr.class "journal-memo" ] [ Html.text (Maybe.withDefault "" row.memo) ]
+        , Html.td [ Attr.class "number journal-debit" ] [ Html.text (maybeMoney row.debit) ]
+        , Html.td [ Attr.class "number journal-credit" ] [ Html.text (maybeMoney row.credit) ]
         ]
 
 
@@ -1432,7 +1471,7 @@ viewReport title period model =
         [ sectionHeader title (Html.text "")
         , if period then viewPeriodToolbar model else viewAsOfToolbar model
         , viewValidationMessages model.pageValidation
-        , Html.table [ Attr.class "data-table" ]
+        , Html.table [ Attr.class "data-table report-table" ]
             [ Html.thead [] [ Html.tr [] [ Html.th [] [ Html.text "Section" ], Html.th [] [ Html.text "Account" ], Html.th [] [ Html.text "Asset" ], Html.th [ Attr.class "number" ] [ Html.text "Pretax" ], Html.th [ Attr.class "number" ] [ Html.text "Posttax" ] ] ]
             , Html.tbody [] (List.map viewReportRow model.reportRows)
             ]
@@ -1441,12 +1480,12 @@ viewReport title period model =
 
 viewReportRow : ReportRow -> Html Msg
 viewReportRow row =
-    Html.tr [ Attr.classList [ ( "report-total", row.rowKind /= "account" ) ] ]
-        [ Html.td [] [ Html.text row.section ]
-        , Html.td [] [ Html.text row.account ]
-        , Html.td [] [ Html.text (Maybe.withDefault "" row.originalCurrency) ]
-        , Html.td [ Attr.class "number" ] [ Html.text (maybeMoney row.pretax) ]
-        , Html.td [ Attr.class "number" ] [ Html.text (maybeMoney row.posttax) ]
+    Html.tr [ reportRowClasses row.rowKind ]
+        [ Html.td [ Attr.class "report-section" ] [ Html.text row.section ]
+        , Html.td [ Attr.class "report-account" ] [ Html.text row.account ]
+        , Html.td [ Attr.class "report-asset" ] [ Html.text (Maybe.withDefault "" row.originalCurrency) ]
+        , Html.td [ Attr.class "number report-pretax" ] [ Html.text (maybeMoney row.pretax) ]
+        , Html.td [ Attr.class "number report-posttax" ] [ Html.text (maybeMoney row.posttax) ]
         ]
 
 
@@ -1456,7 +1495,7 @@ viewTrialBalance model =
         [ sectionHeader "Trial Balance" (Html.text "")
         , viewAsOfToolbar model
         , viewValidationMessages model.pageValidation
-        , Html.table [ Attr.class "data-table" ]
+        , Html.table [ Attr.class "data-table report-table trial-balance-table" ]
             [ Html.thead [] [ Html.tr [] [ Html.th [] [ Html.text "Account" ], Html.th [] [ Html.text "Asset" ], Html.th [ Attr.class "number" ] [ Html.text "Debit" ], Html.th [ Attr.class "number" ] [ Html.text "Credit" ] ] ]
             , Html.tbody [] (List.map viewTrialRow model.trialRows)
             ]
@@ -1475,11 +1514,24 @@ viewValidationMessages messages =
 
 viewTrialRow : TrialRow -> Html Msg
 viewTrialRow row =
-    Html.tr [ Attr.classList [ ( "report-total", row.rowKind /= "account" ) ] ]
-        [ Html.td [] [ Html.text row.account ]
-        , Html.td [] [ Html.text (Maybe.withDefault "" row.originalCurrency) ]
-        , Html.td [ Attr.class "number" ] [ Html.text (maybeMoney row.debit) ]
-        , Html.td [ Attr.class "number" ] [ Html.text (maybeMoney row.credit) ]
+    Html.tr [ reportRowClasses row.rowKind ]
+        [ Html.td [ Attr.class "report-account" ] [ Html.text row.account ]
+        , Html.td [ Attr.class "report-asset" ] [ Html.text (Maybe.withDefault "" row.originalCurrency) ]
+        , Html.td [ Attr.class "number report-debit" ] [ Html.text (maybeMoney row.debit) ]
+        , Html.td [ Attr.class "number report-credit" ] [ Html.text (maybeMoney row.credit) ]
+        ]
+
+
+reportRowClasses : String -> Html.Attribute Msg
+reportRowClasses rowKind =
+    Attr.classList
+        [ ( "report-row", True )
+        , ( "report-account-row", rowKind == "account" )
+        , ( "report-computed-row", rowKind == "computed" )
+        , ( "report-section-total", rowKind == "section_total" || rowKind == "total" )
+        , ( "report-grand-total", rowKind == "grand_total" )
+        , ( "report-difference-row", rowKind == "difference" )
+        , ( "report-total", rowKind /= "account" )
         ]
 
 
@@ -1502,7 +1554,7 @@ viewPeriodToolbar model =
 
 viewAddBook : Model -> Html Msg
 viewAddBook model =
-    Html.section [ Attr.class "panel narrow-page" ]
+    Html.section [ Attr.class "panel narrow-page form-page" ]
         [ sectionHeader "Add book" (Html.text "")
         , Html.form [ Attr.class "form", Events.onSubmit SubmitBook ]
             [ inputField "Identifier" "text" model.bookIdInput UpdateBookId
@@ -1515,7 +1567,7 @@ viewAddBook model =
 
 viewAddAccount : Model -> Html Msg
 viewAddAccount model =
-    Html.section [ Attr.class "panel narrow-page" ]
+    Html.section [ Attr.class "panel narrow-page form-page" ]
         [ sectionHeader "Add account" (Html.text "")
         , viewValidationMessages model.pageValidation
         , Html.form [ Attr.class "form", Events.onSubmit SubmitAccount ]

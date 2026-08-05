@@ -31,9 +31,51 @@ try {
   // Shell and ledger page, including details and SQL-backed normalization.
   await page.getByLabel("Book").selectOption("web-test");
   await page.getByText("Line updated", { exact: true }).waitFor();
+  const ledgerPanel = panel("Account ledger");
+  const ledgerRegister = ledgerPanel.locator(".ledger-register");
+  const ledgerAppearance = await ledgerRegister.evaluate((table) => {
+    const header = table.querySelector("thead th");
+    const row = table.querySelector("tbody .ledger-line");
+    const amount = table.querySelector("tbody .ledger-amount");
+    const green = table.querySelector("tbody .ledger-line-green td");
+    const yellow = table.querySelector("tbody .ledger-line-yellow td");
+    if (!header || !row || !amount || !green || !yellow) return null;
+    const headerStyle = getComputedStyle(header);
+    const amountStyle = getComputedStyle(amount);
+    return {
+      fontFamily: getComputedStyle(table).fontFamily,
+      headerBackground: headerStyle.backgroundColor,
+      rowHeight: row.getBoundingClientRect().height,
+      amountAlignment: amountStyle.textAlign,
+      amountNumerals: amountStyle.fontVariantNumeric,
+      gridWidth: amountStyle.borderRightWidth,
+      gridStyle: amountStyle.borderRightStyle,
+      greenBackground: getComputedStyle(green).backgroundColor,
+      yellowBackground: getComputedStyle(yellow).backgroundColor,
+      cellWhiteSpace: amountStyle.whiteSpace,
+    };
+  });
+  assert(ledgerAppearance !== null, "ledger register is missing its semantic row classes");
+  assert(ledgerAppearance.fontFamily.includes("Arial"), "ledger register lost its compact accounting typeface");
+  assert(ledgerAppearance.headerBackground === "rgb(150, 177, 131)", "ledger register header lost its green band");
+  assert(ledgerAppearance.rowHeight <= 34, `ledger rows are no longer compact (${ledgerAppearance.rowHeight}px)`);
+  assert(ledgerAppearance.amountAlignment === "right", "ledger amounts are not right aligned");
+  assert(ledgerAppearance.amountNumerals.includes("tabular-nums"), "ledger amounts lost tabular numerals");
+  assert(ledgerAppearance.gridWidth === "1px" && ledgerAppearance.gridStyle === "solid", "ledger register lost its cell grid");
+  assert(ledgerAppearance.greenBackground === "rgb(191, 222, 185)", "ledger green transaction band is missing");
+  assert(ledgerAppearance.yellowBackground === "rgb(255, 239, 152)", "ledger yellow transaction band is missing");
+  assert(ledgerAppearance.cellWhiteSpace === "nowrap", "ledger cells no longer resist wrapping");
   const originalRow = page.locator("tr").filter({ hasText: "Line updated" });
   await originalRow.getByRole("button", { name: "Details" }).click();
   await page.getByRole("cell", { name: "Food", exact: true }).first().waitFor();
+  const splitAppearance = await ledgerRegister.locator(".ledger-split-line").first().evaluate((row) => ({
+    background: getComputedStyle(row.children[3]).backgroundColor,
+    emptyDateBackground: getComputedStyle(row.children[0]).backgroundColor,
+    height: row.getBoundingClientRect().height,
+  }));
+  assert(splitAppearance.background === "rgb(237, 231, 211)", "ledger split lines lost their beige detail band");
+  assert(splitAppearance.emptyDateBackground === "rgb(246, 245, 244)", "ledger split date gutter is not visually empty");
+  assert(splitAppearance.height <= 32, `ledger split rows are no longer compact (${splitAppearance.height}px)`);
   await originalRow.getByRole("button", { name: "Transaction" }).click();
   const editTransaction = panel(/^Edit transaction /);
   await editTransaction.getByRole("heading", { name: /^Edit transaction / }).waitFor();
@@ -92,6 +134,29 @@ try {
     const reportPanel = panel(heading);
     await reportPanel.getByRole("heading", { name: heading }).waitFor();
     await reportPanel.locator("tbody tr").first().waitFor();
+    if (value === "general-journal") {
+      const journalAppearance = await reportPanel.locator(".general-journal-table").evaluate((table) => {
+        const firstLine = table.querySelector("tbody .journal-first-line");
+        const credit = table.querySelector("tbody .journal-credit-account");
+        const even = table.querySelector("tbody .journal-group-even td");
+        const odd = table.querySelector("tbody .journal-group-odd td");
+        if (!firstLine || !credit || !even || !odd) return null;
+        return {
+          firstLineBorder: getComputedStyle(firstLine.children[0]).borderTopWidth,
+          creditIndent: Number.parseFloat(getComputedStyle(credit).paddingLeft),
+          evenBackground: getComputedStyle(even).backgroundColor,
+          oddBackground: getComputedStyle(odd).backgroundColor,
+        };
+      });
+      assert(journalAppearance !== null, "general journal is missing its transaction grouping classes");
+      assert(journalAppearance.firstLineBorder === "2px", "general journal transaction boundary is missing");
+      assert(journalAppearance.creditIndent >= 28, "general journal credits lost their indentation");
+      assert(journalAppearance.evenBackground === "rgb(191, 222, 185)", "general journal green band is missing");
+      assert(journalAppearance.oddBackground === "rgb(255, 239, 152)", "general journal yellow band is missing");
+    } else {
+      assert(await reportPanel.locator(".report-table").count() === 1, `${heading} lost its financial report table styling`);
+      assert(await reportPanel.locator(".report-total").count() > 0, `${heading} has no visually distinct totals`);
+    }
     if (value === "balance-sheet" || value === "trial-balance") {
       const asOf = await reportPanel.getByLabel("As of").inputValue();
       assert(/^\d{4}-\d{2}-\d{2}$/.test(asOf), `${heading} did not use its SQL as-of default`);
@@ -130,7 +195,12 @@ try {
   await addAccount.getByLabel("Name").fill("Browser Cash");
   await addAccount.getByLabel("Opening balance (optional)").fill("25");
   await addAccount.getByRole("button", { name: "Create account" }).click();
+  await waitUntilReady();
   await page.getByText("Opening balance", { exact: true }).waitFor();
+  await page
+    .getByLabel("Account")
+    .locator('option[value="Browser Cash"]:checked')
+    .waitFor({ state: "attached" });
   assert(await page.getByLabel("Account").inputValue() === "Browser Cash", "created account was not selected");
 
   await page.setViewportSize({ width: 390, height: 844 });
@@ -143,6 +213,17 @@ try {
     () => document.documentElement.scrollWidth > window.innerWidth,
   );
   if (viewportOverflow) errors.push("the mobile document overflows the viewport");
+  const mobileRegister = page.locator(".ledger-register");
+  const mobileLedgerAppearance = await mobileRegister.evaluate((table) => ({
+    tableScrollWidth: table.scrollWidth,
+    panelClientWidth: table.parentElement.clientWidth,
+    rowHeight: table.querySelector("tbody .ledger-line").getBoundingClientRect().height,
+  }));
+  assert(
+    mobileLedgerAppearance.tableScrollWidth > mobileLedgerAppearance.panelClientWidth,
+    "mobile ledger no longer preserves the full accounting register",
+  );
+  assert(mobileLedgerAppearance.rowHeight <= 34, `mobile ledger rows wrapped to ${mobileLedgerAppearance.rowHeight}px`);
 
   if (errors.length > 0) {
     throw new Error(`browser errors:\n${errors.join("\n")}`);
