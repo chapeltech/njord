@@ -1,3 +1,6 @@
+DROP SCHEMA IF EXISTS api CASCADE;
+DROP SCHEMA IF EXISTS plutus CASCADE;
+
 DROP FUNCTION IF EXISTS bsheet;
 DROP FUNCTION IF EXISTS bsheet_report;
 DROP FUNCTION IF EXISTS tb_report;
@@ -42,6 +45,10 @@ DROP TABLE IF EXISTS valuations;
 DROP TABLE IF EXISTS asset;
 
 DROP FUNCTION IF EXISTS ensure_cash_account_is_asset;
+DROP FUNCTION IF EXISTS enforce_account_invariants;
+DROP FUNCTION IF EXISTS enforce_resolved_xaction_balance;
+DROP FUNCTION IF EXISTS assert_resolved_xaction_balance;
+DROP FUNCTION IF EXISTS opening_balance_account;
 
 DROP TYPE IF EXISTS xaction_elem;
 

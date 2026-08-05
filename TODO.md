@@ -1,63 +1,46 @@
 # TODO
 
-## Accounting Constraints
+The only active project is replacing the custom Servant server with a
+localhost PostgREST API for the simple personal-accounting UI.  Business
+expense, VAT, invoice, import, and other company-accounting work is outside
+this migration.  Existing SQL support for those areas remains in place.
 
-- Add a deferred constraint trigger that rejects any resolved transaction
-  whose lines do not sum to zero per book and per asset.
-- Make CSV imports create unresolved transactions instead of resolved
-  one-sided transactions.
-- Add an audit view for unbalanced transactions.
-- Add an audit view for unresolved transactions with all line details.
-- Add uniqueness for `valuations(date, src, dst)`.
-- Add uniqueness for `xaction_tags(xid, tag)`.
-- Consider making `valuations.rate` `NOT NULL` and positive.
-- Consider making account tax treatment a named policy instead of a raw
-  multiplier on `accts`.
+1. [x] Restore a green baseline.
+   Complete the interrupted SQL loader work and make the existing SQL and API
+   tests pass before changing transport behaviour.
 
-## Valuations
+2. [x] Enforce the core ledger invariants in PostgreSQL.
+   Add deferred resolved-transaction balance enforcement, require incomplete
+   imports to remain unresolved, and test both direct SQL and function-based
+   writes.
 
-- Make historical reports use the latest valuation at or before the report
-  date.
-- Decide how foreign-exchange transactions should balance: strict per-asset
-  balancing, explicit exchange accounts, or a separate exchange-lot model.
-- Add reports for accounts or assets without a valuation path to the reporting
-  currency.
-- Decide whether `full_valuations` should include date-sensitive paths or only
-  current conversion paths.
+3. [x] Create the PostgREST `api` schema.
+   Add one canonical table-returning page function for the application shell,
+   account ledger, General Journal, Balance Sheet, Trial Balance, income and
+   expense report, add-book page, and add-account page.  Each function must
+   return the complete page model in one call.
 
-## Imports
+4. [x] Create the SQL mutation API.
+   Add functions for creating books and accounts, creating and replacing
+   transactions, updating ledger lines, and previewing split transactions.
+   Keep accounting validation and description/memo normalization in SQL.
 
-- Replace temporary-only CSV import with persistent import batches and import
-  rows.
-- Store source filename, import time, source account, and row number for each
-  imported row.
-- Add reconciliation procedures that convert staged rows into balanced
-  transactions.
-- Add duplicate detection for bank imports.
-- Support per-bank CSV layouts without changing core ledger tables.
+5. [x] Run PostgREST locally.
+   Add a checked-in development configuration and launcher that expose only
+   the `api` schema and bind PostgREST to `127.0.0.1`.
 
-## Reporting
+6. [x] Convert Elm one page at a time.
+   Replace existing REST requests with PostgREST `/rpc` calls, starting with
+   the shell and ledger.  Remove accounting calculations, account-choice
+   filtering, and authoritative validation from Elm as their SQL equivalents
+   become available.
 
-- Extend Profit & Loss with configurable subtotal categories.
-- Add UI support for marking cash and cash-equivalent accounts.
-- Add VAT return support from `business_expense_detail` and future sales
-  invoice metadata.
-- Add Corporation Tax adjustment reports for disallowable, capital, mixed-use,
-  and mileage-claim expense treatments.
-- Add date-range filtering to Trial Balance when we want period movement
-  columns alongside ending balances.
-- Add date filters to General Journal.
-- Add account register reports with running balances and counterparty account
-  summaries.
-- Add tag-based spending reports.
-- Add expected income/yield reports for accounts and assets.
-- Decide whether common reports should require a book argument or expose
-  multi-book views plus book-filtered helper functions.
+7. [x] Remove Servant.
+   After endpoint parity, remove the custom Haskell server and its Cabal
+   dependencies.  Serve the compiled Elm files with a small localhost static
+   server that proxies API requests to PostgREST.
 
-## Project Shape
-
-- Keep the core package SQL-only.
-- Expand the SQL test suite as accounting constraints are added.
-- Document each public procedure and report view in one place.
-- Avoid putting accounting correctness in future UI code; UI code should call
-  SQL APIs and rely on database constraints.
+8. [x] Verify the boundary.
+   Use SQL tests for accounting behaviour, PostgREST smoke tests for page and
+   mutation functions, and an Elm build plus browser smoke test for
+   presentation and editing behaviour.

@@ -1,9 +1,11 @@
 {
   "scripts": {
     "build": "cd frontend && ELM_HOME=../.elm-home elm make src/Main.elm --output=app.js",
-    "dev": "cd frontend && ELM_HOME=../.elm-home elm reactor --port=18081"
+    "serve": "node scripts/static-server.mjs",
+    "dev": "npm run build && npm run serve"
   },
   "devDependencies": {
-    "elm": "0.19.1-6"
+    "elm": "0.19.1-6",
+    "playwright": "^1.62.1"
   }
 }

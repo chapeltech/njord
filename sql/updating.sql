@@ -4,8 +4,8 @@
 -- function which consumes a timestamp and a list of rows which comprise a
 -- single split transaction.
 --
--- XXXrcd: this is where we will likely put the CONSTRAINT logic as all
---         of the rows of the transaction must add up to zero.
+-- Final resolved-transaction validity is checked by the deferred constraint
+-- triggers in schema.sql after this procedure has written every line.
 
 CREATE TYPE xaction_elem AS (
 	acct VARCHAR,
@@ -27,6 +27,12 @@ DECLARE
 	line_count INTEGER;
 BEGIN
     line_count := COALESCE(array_length(xs, 1), 0);
+
+    IF line_count = 0 THEN
+	RAISE EXCEPTION 'transactions require at least one line'
+	    USING ERRCODE = '23514',
+		  CONSTRAINT = 'xaction_requires_lines';
+    END IF;
 
     IF line_count = 2 THEN
 	SELECT NULLIF(btrim(vendor), '')
@@ -90,7 +96,6 @@ LANGUAGE plpgsql
 AS $$
 BEGIN
     CALL create_xaction_v(book, t, resolved, xaction_bits);
-    COMMIT;
 END;
 $$;
 
@@ -99,11 +104,7 @@ $$;
 -- a transaction which is a simple move from one account to another in
 -- the same currency with no splits.
 --
--- XXXrcd: should check that accounts have the same underlying
---         asset type or raise an exception.
---
--- XXXrcd: this doesn't need CONSTRAINT logic because it can't violate
---         the constaints.
+-- A simple transaction must move value between accounts in the same asset.
 
 CREATE OR REPLACE PROCEDURE create_simple_xaction(
 	book VARCHAR,
@@ -114,11 +115,70 @@ CREATE OR REPLACE PROCEDURE create_simple_xaction(
 LANGUAGE plpgsql
 AS $$
 DECLARE
-	ourxid INTEGER;
+	asset1 VARCHAR;
+	asset2 VARCHAR;
 BEGIN
+    SELECT atype INTO STRICT asset1
+    FROM accts
+    WHERE book_id = book AND id = acct1;
+
+    SELECT atype INTO STRICT asset2
+    FROM accts
+    WHERE book_id = book AND id = acct2;
+
+    IF asset1 <> asset2 THEN
+	RAISE EXCEPTION 'accounts % and % use different assets (% and %)',
+	    acct1, acct2, asset1, asset2
+	    USING ERRCODE = '23514',
+		  CONSTRAINT = 'simple_xaction_same_asset';
+    END IF;
+
     CALL create_xaction(book, t, TRUE,
 			ROW(acct1, amt, NULL),
 			ROW(acct2, -amt, NULL));
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION opening_balance_account(
+    book VARCHAR,
+    atype VARCHAR
+)
+RETURNS VARCHAR
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    reporting_asset VARCHAR;
+    account_id VARCHAR;
+    existing_type VARCHAR;
+    existing_asset VARCHAR;
+BEGIN
+    SELECT books.reporting_asset
+    INTO STRICT reporting_asset
+    FROM books
+    WHERE books.id = book;
+
+    account_id := CASE
+	WHEN atype = reporting_asset THEN 'Opening Balance'
+	ELSE 'Opening Balance (' || atype || ')'
+    END;
+
+    SELECT type, accts.atype
+    INTO existing_type, existing_asset
+    FROM accts
+    WHERE book_id = book
+      AND id = account_id;
+
+    IF NOT FOUND THEN
+	INSERT INTO accts (book_id, id, type, atype)
+	VALUES (book, account_id, 'Q', atype);
+    ELSIF existing_type <> 'Q' OR existing_asset <> atype THEN
+	RAISE EXCEPTION 'opening balance account % has type % and asset %, expected Q and %',
+	    account_id, existing_type, existing_asset, atype
+	    USING ERRCODE = '23514',
+		  CONSTRAINT = 'opening_balance_account_shape';
+    END IF;
+
+    RETURN account_id;
 END;
 $$;
 
@@ -131,9 +191,12 @@ CREATE OR REPLACE PROCEDURE open_account (
 	amt	NUMERIC)
 LANGUAGE plpgsql
 AS $$
+DECLARE
+    opening_account VARCHAR;
 BEGIN
     INSERT INTO accts (book_id, id, type, atype) VALUES (book, acct, type, atype);
-    CALL create_simple_xaction(book, date, acct, 'Opening Balance', amt);
+    opening_account := opening_balance_account(book, atype);
+    CALL create_simple_xaction(book, date, acct, opening_account, amt);
 END;
 $$;
 
@@ -145,10 +208,13 @@ CREATE OR REPLACE PROCEDURE open_account_pretax (
 	amt	NUMERIC)
 LANGUAGE plpgsql
 AS $$
+DECLARE
+    opening_account VARCHAR;
 BEGIN
     INSERT INTO accts (book_id, id, type, atype, pretax)
 	VALUES (book, acct, 'A', atype, 0.6);
-    CALL create_simple_xaction(book, date, acct, 'Opening Balance', amt);
+    opening_account := opening_balance_account(book, atype);
+    CALL create_simple_xaction(book, date, acct, opening_account, amt);
 END;
 $$;
 
@@ -176,7 +242,7 @@ BEGIN
 		CAST(regexp_replace(amt, ',', '', 'g') AS NUMERIC) AS value
 	    FROM import
 	LOOP
-	    CALL create_xaction_nc(book, t, TRUE, ROW(acct1, value, v));
+	    CALL create_xaction_nc(book, t, FALSE, ROW(acct1, value, v));
 	END LOOP;
 END;
 $$;

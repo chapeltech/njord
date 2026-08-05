@@ -1,52 +1,137 @@
 # Plutus
 
-Plutus is a SQL-only financial management package for PostgreSQL.  Use `psql`
-directly to create accounts, record transactions, import data, and run
-reports.
+Plutus is a PostgreSQL-backed personal-accounting application. PostgreSQL owns
+the ledger rules, mutations, page models, and reports; PostgREST exposes only a
+dedicated `api` schema; Elm provides the browser presentation.
 
-## Setup
+The database also retains SQL support for business-expense metadata, VAT,
+imports, and other company-accounting work. Those features are intentionally
+outside the current web UI.
 
-Create a database and load the schema:
+## Requirements
+
+- PostgreSQL 17 (older supported releases may work, but CI-style development
+  testing currently uses 17)
+- Node.js 20 or later and npm
+- Chromium for the Playwright browser smoke test (`npx playwright install chromium`)
+- `curl`, `sha256sum`, and `xz` for the pinned PostgREST installer
+
+The project pins PostgREST 14.16. On Linux x86-64, install it locally with:
+
+```sh
+scripts/install-postgrest
+```
+
+Set `POSTGREST_BIN` instead if PostgREST 14.16 is installed elsewhere or the
+platform is not Linux x86-64.
+
+## Set up a development database
 
 ```sh
 createdb finances
-psql -d finances -f sql/plutus.sql
+psql -v ON_ERROR_STOP=1 -d finances -f sql/plutus.sql
+npm install
+npx playwright install chromium
+npm run build
 ```
 
-The loader resets and recreates the schema using:
+The SQL loader is deliberately repeatable: it recreates Plutus objects and
+loads the schema, reference data, accounting functions and reports, and the
+PostgREST API.
 
-- `sql/schema.sql`
-- `sql/currencies.sql`
-- `sql/intro-accounts.sql`
-- `sql/updating.sql`
-- `sql/reports.sql`
+## Run the application
 
-## Basic Use
-
-Start an interactive SQL session:
+Start PostgREST in one terminal:
 
 ```sh
-psql -d finances
+PLUTUS_DATABASE=finances scripts/run-postgrest
 ```
 
-The seed data creates a default book named `personal`.  Add another book and
-its standard accounts with:
+Start the static Elm server in another:
 
-```sql
-INSERT INTO books (id, name, reporting_asset)
-VALUES ('business', 'Business', 'GBP');
-
-INSERT INTO accts (book_id, id, type, atype)
-VALUES
-    ('business', 'Opening Balance', 'Q', 'GBP'),
-    ('business', 'Income', 'I', 'GBP'),
-    ('business', 'Expenses', 'E', 'GBP');
+```sh
+npm run serve
 ```
 
-Accounts belong to one book, so account names only need to be unique inside a
-book.
+Open `http://127.0.0.1:8080/`. The static server proxies same-origin `/rpc`
+requests to PostgREST at `http://127.0.0.1:3000`; it contains no accounting
+logic.
 
-Open an account with an opening balance:
+Useful overrides are:
+
+- `PLUTUS_DATABASE` and `PLUTUS_DATABASE_ROLE` for the PostgREST launcher;
+- `PGRST_DB_URI` and any standard `PGRST_*` setting for PostgREST itself;
+- `PLUTUS_UI_HOST`, `PLUTUS_UI_PORT`, and `PLUTUS_POSTGREST_URL` for the static
+  server.
+
+Both development servers bind to `127.0.0.1` by default. Authentication is
+deliberately deferred for this localhost phase.
+
+## HTTP API
+
+Only functions in the `api` schema are exposed, under PostgREST `/rpc` routes.
+Base tables and internal reports are not HTTP resources.
+
+Each UI page is returned by one canonical table-returning function:
+
+- `shell_page`
+- `ledger_page`
+- `general_journal_page`
+- `balance_sheet_page`
+- `trial_balance_page`
+- `profit_loss_page`
+- `cash_flow_page`
+- `add_book_page`
+- `add_account_page`
+
+Report page contexts include authoritative date-range, cash-account, and
+missing-valuation messages. Date-valued `as_of` and `to` parameters include
+the complete selected calendar day.
+
+Public mutations are:
+
+- `create_book`
+- `create_account`
+- `preview_transaction`
+- `create_transaction`
+- `replace_transaction`
+- `update_ledger_line`
+
+For example, fetch a ledger page in one request:
+
+```sh
+curl -X POST http://127.0.0.1:3000/rpc/ledger_page \
+  -H 'content-type: application/json' \
+  -d '{"p_book_id":"personal","p_account_id":"Current Account"}'
+```
+
+Preview a transaction without writing it:
+
+```sh
+curl -X POST http://127.0.0.1:3000/rpc/preview_transaction \
+  -H 'content-type: application/json' \
+  -d '{
+    "p_book_id":"personal",
+    "p_transaction":{
+      "date":"2026-01-31",
+      "resolved":true,
+      "comment":"Example",
+      "lines":[
+        {"account":"Current Account","amount":-25},
+        {"account":"Expenses","amount":25}
+      ]
+    }
+  }'
+```
+
+Expected validation failures are PostgreSQL errors with a stable code in the
+PostgREST `details` field. Constraints remain the final protection for direct
+SQL writes.
+
+## Direct SQL use
+
+The seed data creates the `personal` book and standard accounts. Open an asset
+account with an opening balance:
 
 ```sql
 CALL open_account(
@@ -59,21 +144,7 @@ CALL open_account(
 );
 ```
 
-Open a pretax asset account:
-
-```sql
-CALL open_account_pretax('personal', 'Pension', '2026-01-01', 'GBP', 50000.00);
-```
-
-Mark an asset account as cash or cash-equivalent so it participates in the
-Cash Flow report:
-
-```sql
-INSERT INTO cash_accounts (book_id, acct)
-VALUES ('personal', 'Current Account');
-```
-
-Move money between two accounts in the same asset:
+Post a simple transfer:
 
 ```sql
 CALL create_simple_xaction(
@@ -85,307 +156,47 @@ CALL create_simple_xaction(
 );
 ```
 
-Create a split transaction:
-
-```sql
-CALL create_xaction(
-    'personal',
-    '2026-01-31',
-    TRUE,
-    ROW('Current Account', 2200.00, 'Salary payment')::xaction_elem,
-    ROW('Income', -2200.00, 'Salary payment')::xaction_elem
-);
-```
-
-The `TRUE` argument marks the transaction resolved.  Imported or incomplete
-transactions should be marked unresolved until they are balanced and
-classified.
-
-## Business Expenses
-
-Business expense data is metadata over normal double-entry transactions.  The
-ledger remains the accounting truth; the extra tables record suppliers,
-invoice references, VAT treatment, Corporation Tax treatment, business
-purpose, and receipts.
-
-Expense accounts can carry default VAT and tax treatment:
-
-```sql
-INSERT INTO accts (
-    book_id, id, type, atype,
-    default_vat_code, default_tax_treatment
-) VALUES (
-    'business', 'JAGUAR Expenses', 'E', 'GBP',
-    'UK_STANDARD_BLOCKED', 'ALLOWABLE_REVENUE'
-);
-```
-
-Create the actual accounting entry as usual:
-
-```sql
-CALL create_xaction(
-    'business',
-    '2026-04-10',
-    TRUE,
-    ROW('Current Account', -24.00, 'JAGUAR car wash')::xaction_elem,
-    ROW('JAGUAR Expenses', 24.00, 'JAGUAR car wash')::xaction_elem
-);
-```
-
-Attach the business expense header to the transaction:
-
-```sql
-INSERT INTO vendors (book_id, id, name)
-VALUES ('business', 'sparkle-wash', 'Sparkle Wash Ltd');
-
-INSERT INTO business_expenses (
-    book_id, xid, vendor_id, invoice_number, invoice_date, business_purpose
-)
-SELECT book_id, xid, 'sparkle-wash', 'SW-100', '2026-04-10',
-       'Company car cleaning'
-FROM xactions
-WHERE book_id = 'business'
-  AND date = '2026-04-10'
-  AND comment = 'JAGUAR car wash';
-```
-
-Line-level rows are optional.  If a line has no override, reports use the
-account defaults.  Add a line override only for exceptions, such as insurance
-with no VAT:
-
-```sql
-INSERT INTO business_expense_lines (xaction_bit_id, vat_code, note)
-SELECT xaction_bits.id, 'NO_VAT', 'Insurance is VAT exempt/no VAT on invoice'
-FROM xaction_bits
-JOIN xactions
-  ON xactions.book_id = xaction_bits.book_id
- AND xactions.xid = xaction_bits.xid
-WHERE xaction_bits.book_id = 'business'
-  AND xaction_bits.acct = 'JAGUAR Expenses'
-  AND xactions.comment = 'JAGUAR insurance';
-```
-
-Use `business_expense_detail` to see the effective treatment after defaults
-and overrides are applied:
-
-```sql
-SELECT *
-FROM business_expense_detail
-WHERE book_id = 'business'
-ORDER BY date, xid, account;
-```
-
-## Reports
-
-Current balance sheet:
-
-```sql
-SELECT * FROM balance_sheet WHERE book_id = 'personal';
-```
-
-Report-shaped balance sheet with sections and totals:
-
-```sql
-SELECT *
-FROM balance_sheet_report
-WHERE book_id = 'personal'
-ORDER BY section_order, row_order, account;
-```
-
-Balance sheet as of a date:
-
-```sql
-SELECT * FROM bsheet('personal', '2026-01-31');
-```
-
-Report-shaped balance sheet as of a date:
-
-```sql
-SELECT * FROM bsheet_report('personal', '2026-01-31');
-```
-
-Trial Balance:
-
-```sql
-SELECT *
-FROM trial_balance_report
-WHERE book_id = 'personal'
-ORDER BY row_order, account;
-```
-
-Trial Balance as of a date:
-
-```sql
-SELECT * FROM tb_report('personal', '2026-01-31');
-```
-
-Report-shaped Profit & Loss:
-
-```sql
-SELECT *
-FROM profit_loss_report
-WHERE book_id = 'personal'
-ORDER BY section_order, row_order, account;
-```
-
-Profit & Loss for a period:
-
-```sql
-SELECT * FROM pl_report('personal', '2026-01-01', '2026-01-31');
-```
-
-Report-shaped Cash Flow:
-
-```sql
-SELECT *
-FROM cash_flow_report
-WHERE book_id = 'personal'
-ORDER BY section_order, row_order, account;
-```
-
-Cash Flow for a period:
-
-```sql
-SELECT * FROM cf_report('personal', '2026-01-01', '2026-01-31');
-```
-
-Ledger for one account:
+Useful SQL report surfaces include:
 
 ```sql
 SELECT * FROM ledger('personal', 'Current Account');
+SELECT * FROM general_journal WHERE book_id = 'personal';
+SELECT * FROM bsheet_report('personal', '2026-01-31 23:59:59.999999');
+SELECT * FROM tb_report('personal', '2026-01-31 23:59:59.999999');
+SELECT * FROM pl_report('personal', '2026-01-01', '2026-01-31 23:59:59.999999');
+SELECT * FROM cf_report('personal', '2026-01-01', '2026-01-31 23:59:59.999999');
 ```
 
-Full ledger:
+The core report functions accept timestamps and use exact inclusive bounds.
+Use an end-of-day timestamp for a whole calendar day, as above. The `api` page
+functions accept dates and apply that calendar-day conversion automatically.
 
-```sql
-SELECT *
-FROM full_ledger
-WHERE book_id = 'personal'
-ORDER BY acct, date, xid;
-```
-
-General Journal:
-
-```sql
-SELECT *
-FROM general_journal
-WHERE book_id = 'personal'
-ORDER BY date, xid, line_order, line_id;
-```
-
-In the General Journal, `description` is the transaction header from
-`xactions.comment`; `memo` is the individual line comment from
-`xaction_bits.comment`.  Simple two-line transactions should store their text
-in `description` and leave line memos empty.
-
-Latest GBP valuations:
-
-```sql
-SELECT * FROM current_valuations ORDER BY src;
-```
+Incomplete imports remain in `xaction_unresolved` until classified and
+balanced. Resolved transactions must contain at least two non-zero, finite lines,
+must not repeat an account, and must balance separately for every asset.
 
 ## Tests
 
-Run the SQL test suite with:
+With a reachable PostgreSQL server:
 
 ```sh
 tests/run.sh
-```
-
-Run the REST API smoke test with:
-
-```sh
 tests/api.sh
-```
-
-The test runners create temporary PostgreSQL databases, load the schema, run
-assertions, and drop the databases afterwards.  If the current user cannot
-connect directly but has passwordless sudo access to the `postgres` system
-user, the runners use that automatically.
-
-## REST Server
-
-The server is a thin Servant interface over the PostgreSQL schema.  It expects
-the database to have already been loaded with `sql/plutus.sql`.
-
-The current Cabal project is configured for GHC 9.6.7 because the installed
-default GHC is newer than the released Servant dependency bounds.  The
-PostgreSQL client development headers are also required, for example
-`libpq-dev` on Debian.
-
-Build and run the Servant server with:
-
-```sh
-npm install
 npm run build
-cabal build plutus-server
-PLUTUS_DATABASE_URL='dbname=finances' cabal run plutus-server
 ```
 
-The server listens on port `8080` by default.  Set `PLUTUS_PORT` to override
-that.  The Elm app is served from `/` by the same server.
+The SQL and API scripts create isolated temporary databases and remove them on
+exit. `tests/api.sh` starts a temporary PostgREST process and static server,
+checks every page and mutation RPC, checks structured validation failures, and
+confirms that base tables are not exposed. Its browser phase performs real
+create/replace/update saves, exercises every report and both add forms, and
+checks desktop and mobile layouts.
 
-Available endpoints:
+Set the normal libpq variables (`PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`) if
+needed. If direct access is unavailable but passwordless `sudo -u postgres` is
+available, the scripts use it automatically.
 
-- `GET /health`
-- `GET /books`
-- `POST /books`
-- `GET /books/:book_id/accounts`
-- `POST /books/:book_id/accounts`
-- `POST /books/:book_id/transactions`
-- `GET /books/:book_id/ledger/:account_id`
-- `GET /books/:book_id/reports/balance-sheet`
-- `GET /books/:book_id/reports/balance-sheet?as_of=2026-01-31`
-- `GET /books/:book_id/reports/trial-balance`
-- `GET /books/:book_id/reports/trial-balance?as_of=2026-01-31`
-- `GET /books/:book_id/reports/profit-loss`
-- `GET /books/:book_id/reports/profit-loss?from=2026-01-01&to=2026-01-31`
-- `GET /books/:book_id/reports/cash-flow`
-- `GET /books/:book_id/reports/cash-flow?from=2026-01-01&to=2026-01-31`
-- `GET /books/:book_id/reports/general-journal`
-- `GET /books/:book_id/balance-sheet`
-- `GET /books/:book_id/balance-sheet?as_of=2026-01-31`
+## Design
 
-Create a book:
-
-```sh
-curl -X POST http://127.0.0.1:8080/books \
-  -H 'content-type: application/json' \
-  -d '{"id":"business","name":"Business","reporting_asset":"GBP"}'
-```
-
-Create an account:
-
-```sh
-curl -X POST http://127.0.0.1:8080/books/personal/accounts \
-  -H 'content-type: application/json' \
-  -d '{"id":"Current Account","type":"A","asset":"GBP"}'
-```
-
-Create a transaction:
-
-```sh
-curl -X POST http://127.0.0.1:8080/books/personal/transactions \
-  -H 'content-type: application/json' \
-  -d '{
-        "date": "2026-01-31",
-        "resolved": true,
-        "lines": [
-          {"account": "Current Account", "amount": 25.00},
-          {"account": "Income", "amount": -25.00}
-        ]
-      }'
-```
-
-## Direct SQL Workflow
-
-The package assumes users are comfortable with SQL.  The normal workflow is:
-
-1. Load the schema with `psql -f sql/plutus.sql`.
-2. Add books, accounts, and transactions using SQL procedures.
-3. Use views and table-returning functions for reports.
-4. Keep incomplete imported rows unresolved until reconciled.
-5. Add new reports as SQL views or functions.
-
-All durable accounting rules should be enforced by PostgreSQL itself.  Future
-interfaces should remain thin clients over this SQL representation.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the page-function contract,
+accounting boundary, static-server role, and future authentication seam.

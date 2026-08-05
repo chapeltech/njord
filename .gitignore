@@ -4,3 +4,4 @@ node_modules/
 frontend/app.js
 frontend/elm-stuff/
 .elm-home/
+.tools/

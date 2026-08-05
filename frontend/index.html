@@ -7,13 +7,10 @@
     <link rel="stylesheet" href="/style.css">
   </head>
   <body>
-    <main id="app"></main>
+    <div id="app"></div>
     <script src="/app.js"></script>
     <script>
-      const app = Elm.Main.init({ node: document.getElementById("app") });
-      if (app.ports && app.ports.alertUser) {
-        app.ports.alertUser.subscribe((message) => window.alert(message));
-      }
+      Elm.Main.init({ node: document.getElementById("app") });
     </script>
   </body>
 </html>

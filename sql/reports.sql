@@ -1118,18 +1118,21 @@ RETURNS TABLE (
     ),
     net_income AS (
 	SELECT
-		report_book_id,
+		books.id AS report_book_id,
 		round(
-		    sum(
+		    COALESCE(sum(
 			CASE WHEN account_type = 'I'
 			    THEN -posttax_value
 			    ELSE -posttax_value
 			END
-		    ),
+		    ), 0),
 		    2
 		) AS posttax
-	FROM normalised
-	GROUP BY report_book_id
+	FROM books
+	LEFT JOIN normalised
+	  ON normalised.report_book_id = books.id
+	WHERE books.id = b
+	GROUP BY books.id
     ),
     grand_total AS (
 	SELECT

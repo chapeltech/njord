@@ -1,3 +1,5 @@
+CREATE SCHEMA IF NOT EXISTS plutus;
+
 CREATE TABLE IF NOT EXISTS asset (
 	id	VARCHAR PRIMARY KEY
 	-- XXXrcd: boolean for multiples
@@ -8,11 +10,25 @@ CREATE TABLE IF NOT EXISTS valuations (
 	date	TIMESTAMP NOT NULL,
 	src	VARCHAR NOT NULL REFERENCES asset(id),
 	dst	VARCHAR NOT NULL REFERENCES asset(id),
-	rate	NUMERIC(100,5)
+	rate	NUMERIC(100,5) NOT NULL
 );
+
+ALTER TABLE valuations
+    ALTER COLUMN rate SET NOT NULL;
 CREATE INDEX IF NOT EXISTS valuations_src  ON valuations(src);
 CREATE INDEX IF NOT EXISTS valuations_dst  ON valuations(dst);
 CREATE INDEX IF NOT EXISTS valuations_date ON valuations(date);
+
+DO $$
+BEGIN
+    ALTER TABLE valuations
+	ADD CONSTRAINT valuations_one_rate_per_date
+	UNIQUE (date, src, dst);
+EXCEPTION
+    WHEN duplicate_object OR duplicate_table THEN
+	NULL;
+END;
+$$;
 
 CREATE TABLE IF NOT EXISTS acct_types (
 	id	VARCHAR PRIMARY KEY
@@ -126,6 +142,11 @@ CREATE TABLE IF NOT EXISTS xaction_bits (
 	amt	NUMERIC(100,5) NOT NULL,
 	comment	VARCHAR,
 
+	CHECK (
+	    amt <> 0
+	    AND amt::TEXT NOT IN ('NaN', 'Infinity', '-Infinity')
+	),
+
 	FOREIGN KEY (book_id, xid) REFERENCES xactions(book_id, xid),
 	FOREIGN KEY (book_id, acct) REFERENCES accts(book_id, id)
 );
@@ -151,6 +172,151 @@ CREATE TABLE IF NOT EXISTS xaction_unresolved (
 	PRIMARY KEY (book_id, xid),
 	FOREIGN KEY (book_id, xid) REFERENCES xactions(book_id, xid)
 );
+
+CREATE OR REPLACE FUNCTION assert_resolved_xaction_balance(
+    checked_book_id VARCHAR,
+    checked_xid INTEGER
+)
+RETURNS VOID AS $$
+DECLARE
+    line_count INTEGER;
+    unbalanced_assets VARCHAR;
+BEGIN
+    IF NOT EXISTS (
+	SELECT 1
+	FROM xactions
+	WHERE book_id = checked_book_id
+	  AND xid = checked_xid
+    ) OR EXISTS (
+	SELECT 1
+	FROM xaction_unresolved
+	WHERE book_id = checked_book_id
+	  AND xid = checked_xid
+    ) THEN
+	RETURN;
+    END IF;
+
+    SELECT count(*)
+    INTO line_count
+    FROM xaction_bits
+    WHERE book_id = checked_book_id
+      AND xid = checked_xid;
+
+    IF line_count < 2 THEN
+	RAISE EXCEPTION 'resolved transaction %:% requires at least two lines',
+	    checked_book_id,
+	    checked_xid
+	    USING ERRCODE = '23514',
+		  CONSTRAINT = 'resolved_xaction_balanced';
+    END IF;
+
+    SELECT string_agg(asset || '=' || amount, ', ' ORDER BY asset)
+    INTO unbalanced_assets
+    FROM (
+	SELECT accts.atype AS asset, sum(xaction_bits.amt) AS amount
+	FROM xaction_bits
+	JOIN accts
+	  ON accts.book_id = xaction_bits.book_id
+	 AND accts.id = xaction_bits.acct
+	WHERE xaction_bits.book_id = checked_book_id
+	  AND xaction_bits.xid = checked_xid
+	GROUP BY accts.atype
+	HAVING sum(xaction_bits.amt) <> 0
+    ) AS imbalances;
+
+    IF unbalanced_assets IS NOT NULL THEN
+	RAISE EXCEPTION 'resolved transaction %:% is not balanced',
+	    checked_book_id,
+	    checked_xid
+	    USING ERRCODE = '23514',
+		  CONSTRAINT = 'resolved_xaction_balanced',
+		  DETAIL = 'Asset imbalances: ' || unbalanced_assets;
+    END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION enforce_resolved_xaction_balance()
+RETURNS trigger AS $$
+BEGIN
+    IF TG_OP IN ('UPDATE', 'DELETE') THEN
+	PERFORM assert_resolved_xaction_balance(OLD.book_id, OLD.xid);
+    END IF;
+
+    IF TG_OP IN ('INSERT', 'UPDATE') AND
+       (TG_OP = 'INSERT' OR
+	(OLD.book_id, OLD.xid) IS DISTINCT FROM (NEW.book_id, NEW.xid)) THEN
+	PERFORM assert_resolved_xaction_balance(NEW.book_id, NEW.xid);
+    END IF;
+
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE CONSTRAINT TRIGGER xactions_resolved_balance
+    AFTER INSERT OR UPDATE OR DELETE ON xactions
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW
+    EXECUTE FUNCTION enforce_resolved_xaction_balance();
+
+CREATE CONSTRAINT TRIGGER xaction_bits_resolved_balance
+    AFTER INSERT OR UPDATE OR DELETE ON xaction_bits
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW
+    EXECUTE FUNCTION enforce_resolved_xaction_balance();
+
+CREATE CONSTRAINT TRIGGER xaction_unresolved_resolved_balance
+    AFTER INSERT OR UPDATE OR DELETE ON xaction_unresolved
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW
+    EXECUTE FUNCTION enforce_resolved_xaction_balance();
+
+CREATE OR REPLACE FUNCTION enforce_account_invariants()
+RETURNS trigger AS $$
+DECLARE
+    affected RECORD;
+BEGIN
+    IF EXISTS (
+	SELECT 1
+	FROM cash_accounts
+	JOIN accts
+	  ON accts.book_id = cash_accounts.book_id
+	 AND accts.id = cash_accounts.acct
+	WHERE cash_accounts.book_id = NEW.book_id
+	  AND cash_accounts.acct = NEW.id
+	  AND accts.type <> 'A'
+    ) THEN
+	RAISE EXCEPTION 'cash account %.% must be an asset account',
+	    NEW.book_id,
+	    NEW.id
+	    USING ERRCODE = '23514',
+		  CONSTRAINT = 'cash_accounts_asset_account';
+    END IF;
+
+    IF OLD.atype IS NOT DISTINCT FROM NEW.atype THEN
+	RETURN NULL;
+    END IF;
+
+    FOR affected IN
+	SELECT DISTINCT xaction_bits.book_id, xaction_bits.xid
+	FROM xaction_bits
+	WHERE xaction_bits.book_id = NEW.book_id
+	  AND xaction_bits.acct = NEW.id
+    LOOP
+	PERFORM assert_resolved_xaction_balance(
+	    affected.book_id,
+	    affected.xid
+	);
+    END LOOP;
+
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE CONSTRAINT TRIGGER accts_asset_resolved_balance
+    AFTER UPDATE ON accts
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW
+    EXECUTE FUNCTION enforce_account_invariants();
 
 CREATE TABLE IF NOT EXISTS vendors (
 	book_id	VARCHAR NOT NULL REFERENCES books(id),
@@ -213,13 +379,18 @@ CREATE OR REPLACE VIEW business_expense_detail AS
 	accts.type AS account_type,
 	xaction_bits.comment AS memo,
 	xaction_bits.amt AS amount,
-	COALESCE(business_expense_lines.vat_code, accts.default_vat_code)
+	COALESCE(
+	    business_expense_lines.vat_code,
+	    accts.default_vat_code,
+	    'NO_VAT'
+	)
 	    AS vat_code,
 	vat_codes.vat_rate,
 	vat_codes.recoverable_rate AS vat_recoverable_rate,
 	COALESCE(
 	    business_expense_lines.tax_treatment,
-	    accts.default_tax_treatment
+	    accts.default_tax_treatment,
+	    'ALLOWABLE_REVENUE'
 	) AS tax_treatment,
 	COALESCE(
 	    business_expense_lines.business_use_percent,
@@ -245,9 +416,13 @@ CREATE OR REPLACE VIEW business_expense_detail AS
      AND vendors.id = business_expenses.vendor_id
     LEFT JOIN business_expense_lines
       ON business_expense_lines.xaction_bit_id = xaction_bits.id
-    LEFT JOIN vat_codes
-      ON vat_codes.id =
-	 COALESCE(business_expense_lines.vat_code, accts.default_vat_code);
+	LEFT JOIN vat_codes
+	  ON vat_codes.id =
+	 COALESCE(
+	     business_expense_lines.vat_code,
+	     accts.default_vat_code,
+	     'NO_VAT'
+	 );
 
 -- CREATE RULE xaction_immutable AS ON UPDATE TO xactions
 -- 	WHERE OLD.xid <> NEW.xid OR OLD.id <> NEW.id

@@ -1,0 +1,45 @@
+#!/bin/sh
+
+set -eu
+
+cd "$(dirname "$0")/.."
+
+version=14.16
+archive="postgrest-v${version}-linux-static-x86-64.tar.xz"
+url="https://github.com/PostgREST/postgrest/releases/download/v${version}/${archive}"
+expected_sha256=36b8ae140f188cfcd6003494805bf35a41e895f88c12be9183d60f91782145c6
+destination=.tools/postgrest
+temporary_archive="${TMPDIR:-/tmp}/${archive}.$$"
+
+case "$(uname -s):$(uname -m)" in
+    Linux:x86_64)
+	;;
+    *)
+	echo "No pinned PostgREST binary is configured for $(uname -s) $(uname -m)." >&2
+	echo "Install PostgREST ${version} manually and set POSTGREST_BIN." >&2
+	exit 1
+	;;
+esac
+
+cleanup()
+{
+    rm -f "$temporary_archive"
+}
+
+trap cleanup EXIT HUP INT TERM
+
+mkdir -p .tools
+curl -fL "$url" -o "$temporary_archive"
+
+actual_sha256=$(sha256sum "$temporary_archive" | awk '{print $1}')
+if [ "$actual_sha256" != "$expected_sha256" ]; then
+    echo "PostgREST archive checksum mismatch." >&2
+    echo "expected: $expected_sha256" >&2
+    echo "actual:   $actual_sha256" >&2
+    exit 1
+fi
+
+tar -xJf "$temporary_archive" -C .tools postgrest
+chmod +x "$destination"
+
+"$destination" --version
