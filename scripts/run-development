@@ -1,0 +1,230 @@
+#!/bin/sh
+
+set -eu
+
+cd "$(dirname "$0")/.."
+. scripts/schema-versions
+
+if [ -n "${POSTGREST_BIN:-}" ]; then
+	postgrest_bin=$POSTGREST_BIN
+elif command -v postgrest >/dev/null 2>&1; then
+	postgrest_bin=$(command -v postgrest)
+elif [ -x .tools/postgrest ]; then
+	postgrest_bin=$(pwd)/.tools/postgrest
+else
+	echo "PostgREST is not installed. Run scripts/install-postgrest." >&2
+	exit 1
+fi
+
+control_database=${NJORD_CONTROL_DATABASE:-njord}
+database_role=${NJORD_DATABASE_ROLE:-$(id -un)}
+postgrest_anon_role=$database_role
+runtime_anonymous_role=${NJORD_POSTGREST_ANON_ROLE:-njord_anonymous}
+postgrest_authenticator_role=${NJORD_POSTGREST_AUTHENTICATOR_ROLE:-njord_authenticator}
+control_port=${NJORD_CONTROL_POSTGREST_PORT:-3000}
+control_admin_port=${NJORD_CONTROL_POSTGREST_ADMIN_PORT:-3001}
+ui_port=${NJORD_UI_PORT:-8080}
+ui_host=${NJORD_UI_HOST:-127.0.0.1}
+control_pool_size=${NJORD_CONTROL_POSTGREST_POOL_SIZE:-4}
+book_pool_size=${NJORD_BOOK_POSTGREST_POOL_SIZE:-2}
+runtime_dir=$(mktemp -d "${TMPDIR:-/tmp}/njord-development.XXXXXX")
+control_log=$runtime_dir/control.log
+ui_log=$runtime_dir/ui.log
+control_pid=
+ui_pid=
+broker_pid=
+lifecycle_socket=${NJORD_LIFECYCLE_BROKER_SOCKET:-$runtime_dir/lifecycle.sock}
+runtime_prepared=${NJORD_RUNTIME_PREPARED:-0}
+
+for runtime_role in "$runtime_anonymous_role" "$postgrest_authenticator_role"
+do
+	printf '%s\n' "$runtime_role" | grep -Eq '^[a-z_][a-z0-9_-]{0,62}$' || {
+		echo "Invalid PostgREST runtime role: $runtime_role" >&2
+		exit 2
+	}
+done
+
+if [ "$runtime_prepared" != 1 ]; then
+	psql -X -v ON_ERROR_STOP=1 -q -d postgres \
+	    -v anonymous_role="$runtime_anonymous_role" \
+	    -v authenticator_role="$postgrest_authenticator_role" \
+	    -f sql/create-web-runtime-roles.sql >/dev/null
+	NJORD_CONTROL_DATABASE="$control_database" scripts/migrate-databases --check >/dev/null
+	psql -X -v ON_ERROR_STOP=1 -q -d "$control_database" \
+	    -v anonymous_role="$runtime_anonymous_role" \
+	    -v authenticator_role="$postgrest_authenticator_role" \
+	    -f sql/grant-control-gateway.sql >/dev/null
+	psql -X -v ON_ERROR_STOP=1 -q -d postgres \
+	    -v database_role="$database_role" \
+	    -v authenticator_role="$postgrest_authenticator_role" \
+	    -f sql/grant-role-to-authenticator.sql >/dev/null
+	NJORD_CONTROL_DATABASE="$control_database" \
+	NJORD_POSTGREST_AUTHENTICATOR_ROLE="$postgrest_authenticator_role" \
+	    scripts/reconcile-runtime-principals
+	books=$(psql -X -v ON_ERROR_STOP=1 -qAt -d "$control_database" \
+	    -c "SELECT id FROM njord_control.books WHERE provisioning_state = 'ready' ORDER BY id")
+	for book in $books
+	do
+		psql -X -v ON_ERROR_STOP=1 -q -d "$book" \
+		    -v book_id="$book" -v authenticator_role="$postgrest_authenticator_role" \
+		    -f sql/grant-book-gateway.sql >/dev/null
+	done
+elif [ ! -S "$lifecycle_socket" ]; then
+	echo "Prepared runtime has no lifecycle broker socket: $lifecycle_socket" >&2
+	exit 1
+fi
+export NJORD_BOOK_SCHEMA_VERSION=$BOOK_SCHEMA_VERSION
+
+auth_values="${NJORD_GITHUB_CLIENT_ID:-}${NJORD_GITHUB_CLIENT_SECRET:-}${NJORD_PUBLIC_URL:-}${NJORD_SESSION_SECRET:-}"
+auth_enabled=false
+if [ -n "$auth_values" ]; then
+	for auth_name in NJORD_GITHUB_CLIENT_ID NJORD_GITHUB_CLIENT_SECRET NJORD_PUBLIC_URL NJORD_SESSION_SECRET NJORD_POSTGREST_JWT_SECRET
+	do
+		eval "auth_value=\${$auth_name:-}"
+		if [ -z "$auth_value" ]; then
+			echo "GitHub authentication requires $auth_name." >&2
+			exit 1
+		fi
+	done
+	postgrest_anon_role=$runtime_anonymous_role
+	auth_enabled=true
+fi
+if [ -z "${NJORD_POSTGREST_JWT_SECRET:-}" ]; then
+	NJORD_POSTGREST_JWT_SECRET=$(node -e 'process.stdout.write(require("node:crypto").randomBytes(48).toString("base64url"))')
+	export NJORD_POSTGREST_JWT_SECRET
+fi
+
+terminate_process()
+{
+	process_pid=$1
+	[ -n "$process_pid" ] || return 0
+	kill -0 "$process_pid" >/dev/null 2>&1 || return 0
+	kill -TERM "$process_pid" >/dev/null 2>&1 || true
+	remaining=100
+	while kill -0 "$process_pid" >/dev/null 2>&1 && [ "$remaining" -gt 0 ]
+	do
+		remaining=$((remaining - 1))
+		sleep 0.1
+	done
+	if kill -0 "$process_pid" >/dev/null 2>&1; then
+		kill -KILL "$process_pid" >/dev/null 2>&1 || true
+	fi
+	wait "$process_pid" >/dev/null 2>&1 || true
+}
+
+cleanup()
+{
+	# Drain the HTTP gateway while its control dependency is still available.
+	terminate_process "$ui_pid"
+	terminate_process "$control_pid"
+	terminate_process "$broker_pid"
+	rm -rf "$runtime_dir"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if [ "$runtime_prepared" != 1 ]; then
+	NJORD_LIFECYCLE_BROKER_SOCKET="$lifecycle_socket" \
+	NJORD_CONTROL_DATABASE="$control_database" \
+	NJORD_POSTGREST_AUTHENTICATOR_ROLE="$postgrest_authenticator_role" \
+	    node scripts/lifecycle-broker.mjs >"$runtime_dir/broker.log" 2>&1 &
+	broker_pid=$!
+	attempt=0
+	while [ ! -S "$lifecycle_socket" ] && [ "$attempt" -lt 50 ]
+	do
+		kill -0 "$broker_pid" >/dev/null 2>&1 || break
+		attempt=$((attempt + 1))
+		sleep 0.1
+	done
+	[ -S "$lifecycle_socket" ] || {
+		echo "Lifecycle broker did not become ready." >&2
+		exit 1
+	}
+fi
+
+postgrest_anon_role=$runtime_anonymous_role
+set -- env -i \
+    PATH="$PATH" HOME=/tmp LANG="${LANG:-C}" GHCRTS="${GHCRTS:--N2}" \
+    PGHOST="${PGHOST:-/var/run/postgresql}" PGPORT="${PGPORT:-5432}" \
+    PGRST_DB_URI="postgresql:///$control_database?user=$postgrest_authenticator_role" \
+    PGRST_DB_ANON_ROLE="$postgrest_anon_role" \
+    PGRST_DB_EXTRA_SEARCH_PATH="public, njord_control" \
+    PGRST_SERVER_PORT="$control_port" \
+    PGRST_ADMIN_SERVER_PORT="$control_admin_port" \
+    PGRST_DB_POOL="$control_pool_size"
+set -- "$@" PGRST_JWT_SECRET="$NJORD_POSTGREST_JWT_SECRET" PGRST_JWT_AUD=njord
+set -- "$@" "$postgrest_bin" postgrest.conf
+"$@" >"$control_log" 2>&1 &
+control_pid=$!
+
+ready=false
+attempt=0
+while [ "$attempt" -lt 50 ]
+do
+	if ! kill -0 "$control_pid" >/dev/null 2>&1; then
+		break
+	fi
+	if curl -fsS "http://127.0.0.1:$control_admin_port/ready" >/dev/null 2>&1; then
+		ready=true
+		break
+	fi
+	attempt=$((attempt + 1))
+	sleep 0.1
+done
+
+if [ "$ready" != true ]; then
+	echo "Control PostgREST did not become ready." >&2
+	sed -n '1,160p' "$control_log" >&2
+	exit 1
+fi
+
+POSTGREST_BIN="$postgrest_bin" \
+NJORD_CONTROL_DATABASE="$control_database" \
+NJORD_CONTROL_POSTGREST_URL="http://127.0.0.1:$control_port" \
+NJORD_CONTROL_POSTGREST_ADMIN_URL="http://127.0.0.1:$control_admin_port" \
+NJORD_DATABASE_ROLE="$database_role" \
+NJORD_POSTGREST_AUTHENTICATOR_ROLE="$postgrest_authenticator_role" \
+NJORD_LIFECYCLE_BROKER_SOCKET="$lifecycle_socket" \
+NJORD_MANAGE_BOOK_DATABASES=1 \
+NJORD_BOOK_POSTGREST_POOL_SIZE="$book_pool_size" \
+NJORD_UI_PORT="$ui_port" \
+    node scripts/static-server.mjs >"$ui_log" 2>&1 &
+ui_pid=$!
+
+printf 'Njord control database: %s\n' "$control_database"
+printf 'Njord UI: http://%s:%s/\n' "$ui_host" "$ui_port"
+printf 'Book PostgREST processes start on demand.\n'
+printf 'Book adapters use %s connections and remain running.\n' "$book_pool_size"
+
+set +e
+while kill -0 "$ui_pid" >/dev/null 2>&1 && kill -0 "$control_pid" >/dev/null 2>&1 \
+    && { [ -z "$broker_pid" ] || kill -0 "$broker_pid" >/dev/null 2>&1; }
+do
+	sleep 0.2
+done
+if [ -n "$broker_pid" ] && ! kill -0 "$broker_pid" >/dev/null 2>&1; then
+	wait "$broker_pid"
+	status=$?
+	[ "$status" -ne 0 ] || status=1
+	echo "Lifecycle broker stopped; draining the gateway." >&2
+	sed -n '1,160p' "$runtime_dir/broker.log" >&2 || true
+	terminate_process "$ui_pid"
+	terminate_process "$control_pid"
+elif ! kill -0 "$control_pid" >/dev/null 2>&1; then
+	wait "$control_pid"
+	status=$?
+	[ "$status" -ne 0 ] || status=1
+	echo "Control PostgREST stopped; draining the gateway." >&2
+	sed -n '1,160p' "$control_log" >&2 || true
+	terminate_process "$ui_pid"
+else
+	wait "$ui_pid"
+	status=$?
+	[ "$status" -ne 0 ] || status=1
+	sed -n '1,160p' "$ui_log" >&2 || true
+	terminate_process "$control_pid"
+fi
+set -e
+exit "$status"

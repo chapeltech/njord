@@ -1,0 +1,11 @@
+\ir drop.sql
+\ir schema.sql
+\ir currencies.sql
+\ir reference-data.sql
+\ir updating.sql
+\ir reports.sql
+\ir uk-business.sql
+\ir panama.sql
+\ir taiwan.sql
+\ir jurisdictions.sql
+\ir api.sql

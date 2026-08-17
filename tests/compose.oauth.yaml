@@ -1,0 +1,30 @@
+services:
+  njord:
+    depends_on:
+      github:
+        condition: service_healthy
+    environment:
+      NJORD_GITHUB_AUTHORIZE_URL: https://accounts.test/__github/authorize
+      NJORD_GITHUB_TOKEN_URL: http://github:18084/token
+      NJORD_GITHUB_API_URL: http://github:18084
+
+  github:
+    image: ${NJORD_IMAGE:-njord:compose-oauth-test}
+    entrypoint: ["node", "/test/fake-github.mjs"]
+    environment:
+      TEST_GITHUB_CLIENT_ID: ${NJORD_GITHUB_CLIENT_ID:-compose-oauth-client}
+      TEST_GITHUB_CLIENT_SECRET: compose-oauth-client-secret
+      TEST_PUBLIC_ORIGIN: https://accounts.test
+    expose:
+      - "18084"
+    volumes:
+      - ./tests/fake-github.mjs:/test/fake-github.mjs:ro,Z
+    networks:
+      edge:
+        aliases:
+          - github
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:18084/healthz"]
+      interval: 1s
+      timeout: 1s
+      retries: 20

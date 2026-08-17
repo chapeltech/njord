@@ -1,0 +1,85 @@
+#!/bin/sh
+
+set -eu
+
+cd "$(dirname "$0")/.."
+
+control_database=${NJORD_CONTROL_DATABASE:-njord}
+database_role=${NJORD_DATABASE_ROLE:-$(id -un)}
+psql_bin=${PSQL:-psql}
+createdb_bin=${CREATEDB:-createdb}
+dropdb_bin=${DROPDB:-dropdb}
+example_books=${NJORD_EXAMPLE_BOOKS-'demo personal uk-business panama-property taiwan-injection'}
+
+if ! printf '%s\n' "$control_database" | grep -Eq '^[a-z][a-z0-9_-]{0,62}$'; then
+	echo "Invalid control database handle." >&2
+	exit 2
+fi
+case "$control_database" in
+	postgres|template0|template1|demo|personal|uk-business|panama-property|taiwan-injection)
+		echo "Refusing reserved or colliding control database name: $control_database" >&2
+		exit 2
+		;;
+esac
+if ! printf '%s\n' "$database_role" | grep -Eq '^[a-z0-9][a-z0-9_-]{0,62}$'; then
+	echo "Invalid PostgreSQL user role." >&2
+	exit 2
+fi
+case "$database_role" in
+	postgres|pg_*|njord_control)
+		echo "Refusing administrative or reserved PostgreSQL user role: $database_role" >&2
+		exit 2
+		;;
+esac
+
+database_exists()
+{
+	"$psql_bin" -X -d postgres -Atqc \
+	    "SELECT 1 FROM pg_database WHERE datname = '$1'" | grep -q 1
+}
+
+existing=
+for database in $control_database $example_books
+do
+	if database_exists "$database"; then
+		existing="$existing $database"
+	fi
+done
+
+if [ -n "$existing" ] && [ "${NJORD_REBUILD_DEMOS:-0}" != 1 ]; then
+	echo "Refusing to overwrite existing databases:$existing" >&2
+	echo "Set NJORD_REBUILD_DEMOS=1 only when these development databases may be destroyed." >&2
+	exit 1
+fi
+
+if [ -n "$existing" ]; then
+	for database in $example_books $control_database
+	do
+		"$dropdb_bin" --if-exists --force "$database"
+	done
+fi
+
+"$createdb_bin" "$control_database"
+
+"$psql_bin" -X -v ON_ERROR_STOP=1 -d "$control_database" \
+    -f sql/control.sql
+NJORD_ALLOW_LEGACY_ADOPTION=1 PSQL="$psql_bin" \
+    scripts/migrate-database control "$control_database" >/dev/null
+"$psql_bin" -X -v ON_ERROR_STOP=1 -d postgres \
+    -v database_role="$database_role" -f sql/create-user-role.sql
+"$psql_bin" -X -v ON_ERROR_STOP=1 -d postgres \
+    -v anonymous_role=njord_anonymous -f sql/create-web-runtime-roles.sql
+"$psql_bin" -X -v ON_ERROR_STOP=1 -d "$control_database" \
+    -v control_database="$control_database" -v database_role="$database_role" \
+    -f sql/grant-control-user.sql
+
+for book_id in $example_books
+do
+	NJORD_CONTROL_DATABASE="$control_database" \
+	NJORD_BOOK_OWNER_ROLE="$database_role" \
+		scripts/install-example-book "$book_id"
+done
+
+printf 'control database: %s\n' "$control_database"
+printf 'book databases:%s\n' "${example_books:+ $example_books}"
+printf 'PostgreSQL user role: %s\n' "$database_role"

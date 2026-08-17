@@ -1,0 +1,56 @@
+#!/bin/sh
+
+set -eu
+
+cd "$(dirname "$0")/.."
+. scripts/acquire-lifecycle-lock
+
+mode=
+if [ "${1:-}" = --check ]; then
+	mode=--check
+	shift
+fi
+[ "$#" -eq 0 ] || {
+	echo 'usage: scripts/migrate-databases [--check]' >&2
+	exit 2
+}
+
+control_database=${NJORD_CONTROL_DATABASE:-njord}
+psql_bin=${PSQL:-psql}
+
+PSQL="$psql_bin" scripts/migrate-database $mode control "$control_database"
+
+if [ -z "$mode" ]; then
+	NJORD_CONTROL_DATABASE="$control_database" PSQL="$psql_bin" \
+	    scripts/reconcile-book-lifecycle
+fi
+
+books=$(
+	"$psql_bin" -X -v ON_ERROR_STOP=1 -d "$control_database" -Atq -F '|' -c \
+	    "SELECT id, provisioning_state FROM njord_control.books ORDER BY id"
+)
+
+while IFS='|' read -r book state; do
+	[ -n "$book" ] || continue
+	if [ "$state" != ready ]; then
+		echo "Book $book is left in lifecycle state $state; run scripts/reconcile-book-lifecycle." >&2
+		exit 1
+	fi
+	exists=$(
+		"$psql_bin" -X -v ON_ERROR_STOP=1 -d postgres -Atqc \
+		    "SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = '$book')"
+	)
+	if [ "$exists" != t ]; then
+		echo "Book catalogue entry $book has no physical database; restore or repair it before startup." >&2
+		exit 1
+	fi
+	PSQL="$psql_bin" scripts/migrate-database $mode book "$book"
+	if [ -z "$mode" ]; then
+		"$psql_bin" -X -v ON_ERROR_STOP=1 -q -d "$book" \
+		    -v book_id="$book" -f sql/set-book-access.sql >/dev/null
+		"$psql_bin" -X -v ON_ERROR_STOP=1 -q -d "$book" \
+		    -v book_id="$book" -f sql/grant-book-gateway.sql >/dev/null
+	fi
+done <<EOF
+$books
+EOF

@@ -1,0 +1,134 @@
+#!/bin/sh
+
+set -eu
+
+cd "$(dirname "$0")/.."
+. scripts/acquire-lifecycle-lock
+
+usage()
+{
+	cat >&2 <<'EOF'
+usage: scripts/create-book-database BOOK_ID BOOK_NAME REPORTING_ASSET [ENTITY_TYPE [CREATE_STANDARD_ACCOUNTS]]
+
+Creates one PostgreSQL database containing exactly one Njord book and
+registers it in NJORD_CONTROL_DATABASE (default: njord).
+EOF
+	exit 2
+}
+
+[ "$#" -ge 3 ] && [ "$#" -le 5 ] || usage
+
+book_id=$1
+book_name=$2
+reporting_asset=$3
+entity_type=${4:-household}
+create_standard_accounts=${5:-true}
+control_database=${NJORD_CONTROL_DATABASE:-njord}
+psql_bin=${PSQL:-psql}
+createdb_bin=${CREATEDB:-createdb}
+dropdb_bin=${DROPDB:-dropdb}
+database_role=${NJORD_BOOK_OWNER_ROLE:-$($psql_bin -X -d "$control_database" -Atqc 'SELECT current_user')}
+created=false
+intent=false
+
+if ! printf '%s\n' "$book_id" | grep -Eq '^[a-z][a-z0-9_-]{0,62}$'; then
+	echo "BOOK_ID must be a lowercase PostgreSQL database handle." >&2
+	exit 2
+fi
+
+case "$book_id" in
+	postgres|template0|template1|"$control_database")
+		echo "Refusing reserved database name: $book_id" >&2
+		exit 2
+		;;
+esac
+
+cleanup_failed_database()
+{
+	if [ "$created" = true ]; then
+		"$dropdb_bin" --if-exists "$book_id" >/dev/null 2>&1 || true
+	fi
+	if [ "$intent" = true ]; then
+		"$psql_bin" -X -d "$control_database" -v book_id="$book_id" \
+		    -f sql/unregister-book.sql >/dev/null 2>&1 || true
+	fi
+	created=false
+	intent=false
+}
+
+trap cleanup_failed_database EXIT HUP INT TERM
+
+if "$psql_bin" -X -d postgres -Atqc \
+    "SELECT 1 FROM pg_database WHERE datname = '$book_id'" | grep -q 1
+then
+	echo "Database already exists: $book_id" >&2
+	exit 1
+fi
+
+if [ "${NJORD_BOOK_ALREADY_REGISTERED:-0}" = 1 ]; then
+	"$psql_bin" -X -v ON_ERROR_STOP=1 -d "$control_database" \
+	    -v book_id="$book_id" -v book_name="$book_name" \
+	    -v reporting_asset="$reporting_asset" -v entity_type="$entity_type" \
+	    -f sql/check-book-intent.sql >/dev/null
+else
+	"$psql_bin" -X -v ON_ERROR_STOP=1 -d "$control_database" \
+	    -v database_role="$database_role" -v book_id="$book_id" \
+	    -v book_name="$book_name" -v reporting_asset="$reporting_asset" \
+	    -v entity_type="$entity_type" \
+	    -v create_standard_accounts="$create_standard_accounts" \
+	    -f sql/register-book-intent.sql >/dev/null
+fi
+intent=true
+
+"$createdb_bin" "$book_id"
+created=true
+
+if ! "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$book_id" \
+    -v book_id="$book_id" \
+    -v book_name="$book_name" \
+    -v reporting_asset="$reporting_asset" \
+    -v entity_type="$entity_type" \
+    -v create_standard_accounts="$create_standard_accounts" \
+    -f examples/new-book.sql
+then
+	cleanup_failed_database
+	created=false
+	exit 1
+fi
+
+if ! NJORD_ALLOW_LEGACY_ADOPTION=1 PSQL="$psql_bin" \
+    scripts/migrate-database book "$book_id" >/dev/null
+then
+	cleanup_failed_database
+	created=false
+	exit 1
+fi
+
+if ! "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$book_id" \
+    -v book_id="$book_id" -f sql/set-book-access.sql >/dev/null
+then
+	cleanup_failed_database
+	created=false
+	exit 1
+fi
+
+if ! "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$book_id" \
+    -v book_id="$book_id" -f sql/grant-book-gateway.sql >/dev/null
+then
+	cleanup_failed_database
+	exit 1
+fi
+
+if ! "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$control_database" \
+    -v book_id="$book_id" -f sql/mark-book-ready.sql >/dev/null
+then
+	cleanup_failed_database
+	created=false
+	exit 1
+fi
+
+created=false
+intent=false
+trap - EXIT HUP INT TERM
+printf 'created book database %s for PostgreSQL role %s\n' \
+    "$book_id" "$database_role"

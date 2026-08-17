@@ -1,8 +1,8 @@
 SET DATESTYLE = 'European';
---
--- We use a temp table to give us a chance to manipulate the
--- data on the way in.
--- XXXrcd: rename table?  scoping?
+
+-- Keep imported bank rows in a session-local staging table. import_csv emits
+-- guidance only: callers must classify each row with a balancing account before
+-- recording it as a ledger transaction.
 CREATE TEMP TABLE import (
     date	VARCHAR,
     vendor	VARCHAR,
@@ -11,4 +11,3 @@ CREATE TEMP TABLE import (
 COPY import(date, vendor, amt) FROM STDIN DELIMITER ',' CSV;
 
 CALL import_csv(:'INPUT_BOOK', :'INPUT_ACCOUNT');
-DROP TABLE import;

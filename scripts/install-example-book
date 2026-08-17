@@ -1,0 +1,122 @@
+#!/bin/sh
+
+set -eu
+
+cd "$(dirname "$0")/.."
+. scripts/acquire-lifecycle-lock
+
+usage()
+{
+	echo "usage: scripts/install-example-book personal|demo|uk-business|panama-property|taiwan-injection" >&2
+	exit 2
+}
+
+[ "$#" -eq 1 ] || usage
+
+book_id=$1
+control_database=${NJORD_CONTROL_DATABASE:-njord}
+psql_bin=${PSQL:-psql}
+createdb_bin=${CREATEDB:-createdb}
+dropdb_bin=${DROPDB:-dropdb}
+database_role=${NJORD_BOOK_OWNER_ROLE:-$($psql_bin -X -d "$control_database" -Atqc 'SELECT current_user')}
+
+case "$book_id" in
+	personal)
+		book_name=Personal
+		reporting_asset=GBP
+		entity_type=household
+		;;
+	demo)
+		book_name='A Demo Household'
+		reporting_asset=GBP
+		entity_type=household
+		;;
+	uk-business)
+		book_name='Acacia Digital Ltd'
+		reporting_asset=GBP
+		entity_type=company
+		;;
+	panama-property)
+		book_name='Bahia Verde Rentals, S.A.'
+		reporting_asset=PAB
+		entity_type=company
+		;;
+	taiwan-injection)
+		book_name='福爾摩沙精密塑膠有限公司'
+		reporting_asset=TWD
+		entity_type=company
+		;;
+	*) usage ;;
+esac
+
+if "$psql_bin" -X -d postgres -Atqc \
+    "SELECT 1 FROM pg_database WHERE datname = '$book_id'" | grep -q 1
+then
+	echo "Database already exists: $book_id" >&2
+	exit 1
+fi
+
+created=false
+intent=false
+cleanup()
+{
+	if [ "$created" = true ]; then
+		"$dropdb_bin" --if-exists "$book_id" >/dev/null 2>&1 || true
+	fi
+	if [ "$intent" = true ]; then
+		"$psql_bin" -X -d "$control_database" -v book_id="$book_id" \
+		    -f sql/unregister-book.sql >/dev/null 2>&1 || true
+	fi
+	created=false
+	intent=false
+}
+trap cleanup EXIT HUP INT TERM
+
+"$psql_bin" -X -v ON_ERROR_STOP=1 -d "$control_database" \
+    -v database_role="$database_role" -v book_id="$book_id" \
+    -v book_name="$book_name" -v reporting_asset="$reporting_asset" \
+    -v entity_type="$entity_type" -v create_standard_accounts=false \
+    -f sql/register-book-intent.sql >/dev/null
+intent=true
+
+"$createdb_bin" "$book_id"
+created=true
+if ! "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$book_id" \
+    -f "examples/book-$book_id.sql"
+then
+	cleanup
+	exit 1
+fi
+
+if ! NJORD_ALLOW_LEGACY_ADOPTION=1 PSQL="$psql_bin" \
+    scripts/migrate-database book "$book_id" >/dev/null
+then
+	cleanup
+	exit 1
+fi
+
+if ! "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$book_id" \
+    -v book_id="$book_id" -f sql/set-book-access.sql >/dev/null
+then
+	cleanup
+	exit 1
+fi
+
+if ! "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$book_id" \
+    -v book_id="$book_id" -f sql/grant-book-gateway.sql >/dev/null
+then
+	cleanup
+	exit 1
+fi
+
+if ! "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$control_database" \
+    -v book_id="$book_id" -f sql/mark-book-ready.sql >/dev/null
+then
+	cleanup
+	exit 1
+fi
+
+created=false
+intent=false
+trap - EXIT HUP INT TERM
+printf 'installed example book %s\n' "$book_id"

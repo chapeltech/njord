@@ -1,0 +1,10 @@
+services:
+  njord:
+    environment:
+      NJORD_GITHUB_CLIENT_SECRET_FILE: /run/secrets/github_client_secret
+      NJORD_POSTGREST_JWT_SECRET_FILE: /run/secrets/postgrest_jwt_secret
+      NJORD_SESSION_SECRET_FILE: /run/secrets/session_secret
+    volumes:
+      - ${NJORD_GITHUB_CLIENT_SECRET_FILE:-./secrets/github_client_secret}:/run/secrets/github_client_secret:ro,Z
+      - ${NJORD_POSTGREST_JWT_SECRET_FILE:-./secrets/postgrest_jwt_secret}:/run/secrets/postgrest_jwt_secret:ro,Z
+      - ${NJORD_SESSION_SECRET_FILE:-./secrets/session_secret}:/run/secrets/session_secret:ro,Z

@@ -1,0 +1,49 @@
+#!/bin/sh
+
+set -eu
+
+cd "$(dirname "$0")/.."
+
+control_database=${NJORD_CONTROL_DATABASE:-njord}
+authenticator_role=${NJORD_POSTGREST_AUTHENTICATOR_ROLE:-njord_authenticator}
+psql_bin=${PSQL:-psql}
+
+principals=$(
+	"$psql_bin" -X -v ON_ERROR_STOP=1 -qAt -F '|' -d "$control_database" -c \
+	    "SELECT database_role, disabled_at IS NULL FROM njord_control.principals ORDER BY database_role"
+)
+
+while IFS='|' read -r database_role enabled; do
+	[ -n "$database_role" ] || continue
+	printf '%s\n' "$database_role" | grep -Eq '^[a-z0-9][a-z0-9_-]{0,62}$' || {
+		echo "Invalid principal database role: $database_role" >&2
+		exit 1
+	}
+	if [ "$enabled" = t ]; then role_login=LOGIN; else role_login=NOLOGIN; fi
+	"$psql_bin" -X -v ON_ERROR_STOP=1 -q -d postgres \
+	    -v database_role="$database_role" -v role_login="$role_login" -v role_kind=human \
+	    -f sql/ensure-unprivileged-role.sql >/dev/null
+	if [ "$enabled" = t ]; then
+		membership_script=grant-role-to-authenticator.sql
+	else
+		membership_script=revoke-role-from-authenticator.sql
+	fi
+	"$psql_bin" -X -v ON_ERROR_STOP=1 -q -d postgres \
+	    -v database_role="$database_role" -v authenticator_role="$authenticator_role" \
+	    -f "sql/$membership_script" >/dev/null
+	"$psql_bin" -X -v ON_ERROR_STOP=1 -q -d "$control_database" \
+	    -v control_database="$control_database" -v database_role="$database_role" \
+	    -f sql/grant-control-user.sql >/dev/null
+done <<EOF
+$principals
+EOF
+
+"$psql_bin" -X -v ON_ERROR_STOP=1 -q -d "$control_database" -c '
+SELECT njord_control.set_book_role_membership(
+    membership.book_id,
+    principal.database_role,
+    CASE WHEN principal.disabled_at IS NULL THEN membership.membership_role ELSE NULL END
+)
+FROM njord_control.book_memberships AS membership
+JOIN njord_control.principals AS principal ON principal.id = membership.principal_id;
+' >/dev/null

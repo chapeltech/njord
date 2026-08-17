@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+
+cd "$(dirname "$0")/.."
+
+if [[ $# -ne 1 || -z $1 ]]; then
+	echo 'usage: scripts/backup-cluster-encrypted AGE_RECIPIENT > njord-backup.tar.gz.age' >&2
+	exit 2
+fi
+
+# No plaintext archive is written: age consumes the verified physical backup
+# stream directly, and pipefail propagates a failure from either producer.
+scripts/backup-cluster | age --encrypt --recipient "$1"

@@ -1,0 +1,71 @@
+name: ${NJORD_COMPOSE_PROJECT:-njord}
+
+services:
+  njord:
+    image: ${NJORD_IMAGE:-njord:0.1.0}
+    build:
+      context: .
+    restart: unless-stopped
+    stop_grace_period: 30s
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      POSTGRES_INITDB_ARGS: --data-checksums
+      GHCRTS: ${NJORD_GHCRTS:--N2}
+      NJORD_ADMIN_GITHUB_LOGIN: ${NJORD_ADMIN_GITHUB_LOGIN:-}
+      NJORD_ALLOW_UNAUTHENTICATED: ${NJORD_ALLOW_UNAUTHENTICATED:-0}
+      NJORD_CONTROL_DATABASE: ${NJORD_CONTROL_DATABASE:-njord}
+      NJORD_DATABASE_ROLE: ${NJORD_DATABASE_ROLE:-}
+      NJORD_GITHUB_CLIENT_ID: ${NJORD_GITHUB_CLIENT_ID:-}
+      NJORD_INSTALL_EXAMPLES: ${NJORD_INSTALL_EXAMPLES:-0}
+      NJORD_PUBLIC_URL: ${NJORD_PUBLIC_URL:-}
+      NJORD_UI_PORT: ${NJORD_HTTP_PORT:-8080}
+    expose:
+      - "${NJORD_HTTP_PORT:-8080}"
+    volumes:
+      - njord_data:/var/lib/postgresql
+      - ${NJORD_POSTGRES_PASSWORD_FILE:-./secrets/postgres_password}:/run/secrets/postgres_password:ro,Z
+    networks:
+      edge:
+        aliases:
+          - ${NJORD_NETWORK_ALIAS:-njord}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl --fail --silent --show-error "http://127.0.0.1:$${NJORD_UI_PORT}/readyz" >/dev/null
+      interval: 10s
+      timeout: 3s
+      start_period: 60s
+      retries: 5
+    mem_limit: ${NJORD_MEMORY_LIMIT:-2g}
+    cpus: ${NJORD_CPU_LIMIT:-2.0}
+    pids_limit: ${NJORD_PIDS_LIMIT:-256}
+    shm_size: ${NJORD_SHM_SIZE:-128m}
+    read_only: true
+    tmpfs:
+      - /run:rw,nosuid,nodev,size=32m,mode=0755
+      - /tmp:rw,nosuid,nodev,size=128m,mode=1777
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - KILL
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: ${NJORD_LOG_MAX_SIZE:-10m}
+        max-file: ${NJORD_LOG_MAX_FILES:-5}
+
+volumes:
+  njord_data:
+    name: ${NJORD_DATA_VOLUME:-njord-data}
+
+networks:
+  edge:
+    external: true
+    name: ${NJORD_DOCKER_NETWORK:-njord-edge}

@@ -4,7 +4,7 @@ set -eu
 
 cd "$(dirname "$0")/.."
 
-DB="${PLUTUS_TEST_DB:-plutus_test_$$}"
+DB="${NJORD_TEST_DB:-njord_test_$$}"
 PSQL="${PSQL:-psql}"
 CREATEDB="${CREATEDB:-createdb}"
 DROPDB="${DROPDB:-dropdb}"
@@ -41,11 +41,13 @@ trap cleanup EXIT HUP INT TERM
 cleanup
 run "$CREATEDB" "$DB"
 
-SQL_TMP=$(mktemp -d "${TMPDIR:-/tmp}/plutus-sql.XXXXXX")
-cp sql/*.sql "$SQL_TMP"/
-cp tests/basic.sql "$SQL_TMP"/basic.sql
-chmod a+rx "$SQL_TMP"
-chmod a+r "$SQL_TMP"/*.sql
+SQL_TMP=$(mktemp -d "${TMPDIR:-/tmp}/njord-sql.XXXXXX")
+mkdir "$SQL_TMP/sql" "$SQL_TMP/examples"
+cp sql/*.sql "$SQL_TMP/sql"/
+cp examples/*.sql "$SQL_TMP/examples"/
+cp tests/basic.sql "$SQL_TMP/basic.sql"
+chmod a+rx "$SQL_TMP" "$SQL_TMP/sql" "$SQL_TMP/examples"
+chmod a+r "$SQL_TMP"/*.sql "$SQL_TMP/sql"/*.sql "$SQL_TMP/examples"/*.sql
 
 run_sql()
 {
@@ -55,11 +57,13 @@ run_sql()
 
 load_schema()
 {
-	run_sql "$SQL_TMP/plutus.sql" >/dev/null
+	run_sql "$SQL_TMP/examples/njord-demo.sql" >/dev/null
 }
 
 load_schema
 load_schema
 run_sql "$SQL_TMP/basic.sql"
+
+node tests/oauth.mjs
 
 echo "ok - SQL test suite passed"

@@ -1,0 +1,15 @@
+#!/bin/sh
+
+# Source this file near the start of any cluster operation that must not race a
+# backup, schema migration, or Book create/delete operation.  The descriptor is
+# inherited by child processes; the marker prevents those children attempting
+# to lock the same file again.
+if [ "${NJORD_LIFECYCLE_LOCK_HELD:-0}" != 1 ]; then
+	lock_root=${NJORD_LOCK_DIR:-${TMPDIR:-/tmp}/njord-$(id -u)-locks}
+	umask 077
+	mkdir -p "$lock_root"
+	chmod 700 "$lock_root"
+	exec 8>"$lock_root/cluster-lifecycle.lock"
+	flock -x 8
+	export NJORD_LIFECYCLE_LOCK_HELD=1
+fi

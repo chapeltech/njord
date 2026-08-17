@@ -1,0 +1,70 @@
+#!/bin/sh
+
+set -eu
+
+usage()
+{
+	echo 'usage: scripts/restore-cluster /backup/njord-backup.tar.gz' >&2
+	exit 2
+}
+
+[ "$#" -eq 1 ] || usage
+archive=$1
+target=/var/lib/postgresql/18/docker
+parent=${target%/*}
+
+[ -f "$archive" ] && [ -r "$archive" ] || {
+	echo "Backup is not a readable regular file: $archive" >&2
+	exit 1
+}
+
+if [ -d "$target" ] && [ -n "$(find "$target" -mindepth 1 -print -quit)" ]; then
+	echo "Restore target is not empty: $target" >&2
+	echo 'Restore only into a newly created Njord data volume.' >&2
+	exit 1
+fi
+
+archive_entries=$(tar -tzf "$archive") || {
+	echo 'Backup is not a readable gzip-compressed tar archive.' >&2
+	exit 1
+}
+if printf '%s\n' "$archive_entries" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then
+	echo 'Backup contains an unsafe archive path.' >&2
+	exit 1
+fi
+archive_listing=$(tar -tvzf "$archive") || {
+	echo 'Backup archive metadata could not be inspected.' >&2
+	exit 1
+}
+if ! printf '%s\n' "$archive_listing" | awk '
+    substr($0, 1, 1) != "-" && substr($0, 1, 1) != "d" { exit 1 }
+'; then
+	echo 'Backup contains a link, device, or other unsafe archive member.' >&2
+	exit 1
+fi
+
+mkdir -p "$parent"
+staging=$(mktemp -d "$parent/.njord-restore.XXXXXX")
+cleanup()
+{
+	status=$?
+	trap - EXIT HUP INT TERM
+	if [ -d "$staging" ]; then rm -rf "$staging"; fi
+	exit "$status"
+}
+trap cleanup EXIT HUP INT TERM
+
+tar -xzf "$archive" -C "$staging" --no-same-owner
+[ -f "$staging/PG_VERSION" ] && [ "$(cat "$staging/PG_VERSION")" = 18 ] || {
+	echo 'Backup is not a PostgreSQL 18 data directory.' >&2
+	exit 1
+}
+pg_verifybackup "$staging" >/dev/null
+chown -R postgres:postgres "$staging"
+chmod 0700 "$staging"
+
+if [ -d "$target" ]; then rmdir "$target"; fi
+mv "$staging" "$target"
+staging=
+trap - EXIT HUP INT TERM
+printf 'restored and verified PostgreSQL cluster at %s\n' "$target"

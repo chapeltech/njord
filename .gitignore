@@ -5,3 +5,7 @@ frontend/app.js
 frontend/elm-stuff/
 .elm-home/
 .tools/
+.env
+secrets/
+*.spdx.json
+*.spdx.json.image-id

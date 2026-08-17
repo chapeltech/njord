@@ -1,0 +1,49 @@
+#!/bin/sh
+
+set -eu
+
+cd "$(dirname "$0")/.."
+. scripts/acquire-lifecycle-lock
+
+[ "$#" -eq 0 ] || {
+	echo 'usage: scripts/backup-cluster > njord-backup.tar.gz' >&2
+	exit 2
+}
+
+# Never bless an incompatible or incomplete installation as a recovery point.
+scripts/migrate-databases --check >/dev/null
+
+export PGHOST=${PGHOST:-/var/run/postgresql}
+export PGPORT=${PGPORT:-5432}
+export PGUSER=${PGUSER:-postgres}
+
+# PostgreSQL cannot send tar output and separately streamed WAL to stdout at
+# the same time. Stage a plain physical backup on the durable filesystem,
+# outside PGDATA, then emit one compressed archive. The staging directory is
+# exact and trap-owned, so failure never touches the live cluster.
+backup_parent=/var/lib/postgresql/18
+mkdir -p "$backup_parent"
+staging=$(mktemp -d "$backup_parent/.njord-backup.XXXXXX")
+cleanup()
+{
+	status=$?
+	trap - EXIT HUP INT TERM
+	if [ -d "$staging" ]; then rm -rf "$staging"; fi
+	exit "$status"
+}
+trap cleanup EXIT HUP INT TERM
+
+# A physical base backup is consistent across the control database, every
+# Book database, cluster roles, and WAL.
+pg_basebackup \
+    --pgdata="$staging" \
+    --format=plain \
+    --wal-method=stream \
+    --checkpoint=fast \
+    --manifest-checksums=SHA256 \
+    --label="Njord whole-cluster backup" \
+    --no-password
+
+# stdout contains only the archive so docker compose exec -T can redirect it
+# without mangling bytes. Diagnostics remain on stderr.
+tar -czf - -C "$staging" .

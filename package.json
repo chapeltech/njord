@@ -1,8 +1,17 @@
 {
+  "name": "njord-accounting",
+  "version": "0.1.0",
+  "private": true,
   "scripts": {
     "build": "cd frontend && ELM_HOME=../.elm-home elm make src/Main.elm --output=app.js",
-    "serve": "node scripts/static-server.mjs",
-    "dev": "npm run build && npm run serve"
+    "test:gateway": "node tests/gateway-routing.mjs",
+    "test:supervisor": "node tests/book-supervisor.mjs",
+    "test:broker": "node tests/lifecycle-broker.mjs",
+    "test:oauth": "node tests/oauth.mjs",
+    "test:compose": "tests/compose.sh",
+    "test:compose-oauth": "tests/compose-oauth.sh",
+    "serve:multi": "scripts/run-development",
+    "dev": "npm run build && npm run serve:multi"
   },
   "devDependencies": {
     "elm": "0.19.1-6",

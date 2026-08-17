@@ -4,19 +4,18 @@
 -- function which consumes a timestamp and a list of rows which comprise a
 -- single split transaction.
 --
--- Final resolved-transaction validity is checked by the deferred constraint
+-- Final transaction validity is checked by the deferred constraint
 -- triggers in schema.sql after this procedure has written every line.
 
 CREATE TYPE xaction_elem AS (
 	acct VARCHAR,
 	amt NUMERIC(100,5),
-	vendor VARCHAR
+	memo VARCHAR
 );
 
 CREATE OR REPLACE PROCEDURE create_xaction_v(
 	book	 VARCHAR,
 	t	 TIMESTAMP,
-	resolved BOOLEAN,
 	xs	 XACTION_ELEM[])
 LANGUAGE plpgsql
 AS $$
@@ -35,17 +34,17 @@ BEGIN
     END IF;
 
     IF line_count = 2 THEN
-	SELECT NULLIF(btrim(vendor), '')
+	SELECT NULLIF(btrim(memo), '')
 	INTO tx_comment
 	FROM unnest(xs)
-	WHERE vendor IS NOT NULL
-	  AND btrim(vendor) <> ''
+	WHERE memo IS NOT NULL
+	  AND btrim(memo) <> ''
 	LIMIT 1;
     ELSE
 	SELECT CASE WHEN count(DISTINCT memo) = 1 THEN min(memo) END
 	INTO tx_comment
 	FROM (
-	    SELECT NULLIF(btrim(vendor), '') AS memo
+	    SELECT NULLIF(btrim(memo), '') AS memo
 	    FROM unnest(xs)
 	) AS memos
 	WHERE memo IS NOT NULL;
@@ -63,40 +62,21 @@ BEGIN
 		   x.amt,
 		   CASE
 		       WHEN line_count = 2 THEN NULL
-		       WHEN NULLIF(btrim(x.vendor), '') = tx_comment THEN NULL
-		       ELSE NULLIF(btrim(x.vendor), '')
+		       WHEN NULLIF(btrim(x.memo), '') = tx_comment THEN NULL
+		       ELSE NULLIF(btrim(x.memo), '')
 		   END
 	       );
     END LOOP;
-    IF NOT resolved THEN
-	RAISE NOTICE 'inserting unresolved xaction (%:%)', book, ourxid;
-	INSERT INTO xaction_unresolved VALUES (book, ourxid);
-    END IF;
-END;
-$$;
-
-CREATE OR REPLACE PROCEDURE create_xaction_nc(
-	book VARCHAR,
-	t TIMESTAMP,
-	resolved BOOLEAN,
-	VARIADIC xaction_bits XACTION_ELEM[])
-LANGUAGE plpgsql
-AS $$
-BEGIN
-    CALL create_xaction_v(book, t, resolved, xaction_bits);
 END;
 $$;
 
 CREATE OR REPLACE PROCEDURE create_xaction(
 	book VARCHAR,
 	t TIMESTAMP,
-	resolved BOOLEAN,
 	VARIADIC xaction_bits XACTION_ELEM[])
-LANGUAGE plpgsql
+LANGUAGE SQL
 AS $$
-BEGIN
-    CALL create_xaction_v(book, t, resolved, xaction_bits);
-END;
+    CALL create_xaction_v(book, t, xaction_bits);
 $$;
 
 --
@@ -133,7 +113,7 @@ BEGIN
 		  CONSTRAINT = 'simple_xaction_same_asset';
     END IF;
 
-    CALL create_xaction(book, t, TRUE,
+    CALL create_xaction(book, t,
 			ROW(acct1, amt, NULL),
 			ROW(acct2, -amt, NULL));
 END;
@@ -151,6 +131,7 @@ DECLARE
     account_id VARCHAR;
     existing_type VARCHAR;
     existing_asset VARCHAR;
+    equity_root VARCHAR;
 BEGIN
     SELECT books.reporting_asset
     INTO STRICT reporting_asset
@@ -162,6 +143,13 @@ BEGIN
 	ELSE 'Opening Balance (' || atype || ')'
     END;
 
+    SELECT accts.id
+    INTO equity_root
+    FROM accts
+    WHERE accts.book_id = book
+      AND accts.type = 'Q'
+      AND accts.parent_id IS NULL;
+
     SELECT type, accts.atype
     INTO existing_type, existing_asset
     FROM accts
@@ -169,8 +157,18 @@ BEGIN
       AND id = account_id;
 
     IF NOT FOUND THEN
-	INSERT INTO accts (book_id, id, type, atype)
-	VALUES (book, account_id, 'Q', atype);
+	IF equity_root IS NULL THEN
+	    RAISE EXCEPTION 'book % does not have an Equity root account', book
+		USING ERRCODE = '23514',
+		      CONSTRAINT = 'opening_balance_equity_root';
+	END IF;
+
+	INSERT INTO accts (
+	    book_id, id, name, type, atype, parent_id, account_kind, placeholder
+	)
+	VALUES (
+	    book, account_id, account_id, 'Q', atype, equity_root, 'posting', FALSE
+	);
     ELSIF existing_type <> 'Q' OR existing_asset <> atype THEN
 	RAISE EXCEPTION 'opening balance account % has type % and asset %, expected Q and %',
 	    account_id, existing_type, existing_asset, atype
@@ -186,7 +184,7 @@ CREATE OR REPLACE PROCEDURE open_account (
 	book	VARCHAR,
 	acct	VARCHAR,
 	date	TIMESTAMP,
-	type	VARCHAR,
+	acct_type VARCHAR,
 	atype	VARCHAR,
 	amt	NUMERIC)
 LANGUAGE plpgsql
@@ -194,55 +192,54 @@ AS $$
 DECLARE
     opening_account VARCHAR;
 BEGIN
-    INSERT INTO accts (book_id, id, type, atype) VALUES (book, acct, type, atype);
-    opening_account := opening_balance_account(book, atype);
-    CALL create_simple_xaction(book, date, acct, opening_account, amt);
-END;
-$$;
+    INSERT INTO accts (
+	book_id, id, name, type, atype, parent_id, account_kind, placeholder
+    )
+    SELECT
+	$1, $2, $2, $4, $5, root.id,
+	CASE WHEN $4 = 'A' THEN 'bank' ELSE 'posting' END,
+	FALSE
+    FROM accts AS root
+    WHERE root.book_id = $1
+	AND root.type = $4
+      AND root.parent_id IS NULL;
 
-CREATE OR REPLACE PROCEDURE open_account_pretax (
-	book	VARCHAR,
-	acct	VARCHAR,
-	date	TIMESTAMP,
-	atype	VARCHAR,
-	amt	NUMERIC)
-LANGUAGE plpgsql
-AS $$
-DECLARE
-    opening_account VARCHAR;
-BEGIN
-    INSERT INTO accts (book_id, id, type, atype, pretax)
-	VALUES (book, acct, 'A', atype, 0.6);
-    opening_account := opening_balance_account(book, atype);
-    CALL create_simple_xaction(book, date, acct, opening_account, amt);
+    IF NOT FOUND THEN
+	RAISE EXCEPTION 'book % does not have a root account for class %', book, acct_type
+	    USING ERRCODE = '23514', CONSTRAINT = 'account_requires_root';
+    END IF;
+
+	IF amt IS NULL THEN
+	    RAISE EXCEPTION 'opening balance must be a finite number or zero'
+		USING ERRCODE = '23514',
+		      CONSTRAINT = 'opening_balance_required';
+	END IF;
+	IF NOT njord.is_finite(amt) THEN
+	    RAISE EXCEPTION 'opening balance must be finite'
+		USING ERRCODE = '23514',
+		      CONSTRAINT = 'opening_balance_finite';
+	END IF;
+
+	-- A zero opening balance needs no ledger event. The account itself remains
+	-- useful and can receive its first posting later.
+	IF amt <> 0 THEN
+	    opening_account := opening_balance_account(book, atype);
+	    CALL create_simple_xaction(book, date, acct, opening_account, amt);
+	END IF;
 END;
 $$;
 
 --
--- XXXrcd: for now import_csv() assumes that the the first three
---         columns are date, description, amount.  The rest are
---         ignored...
--- XXXrcd: we import imbalanced transactions as we intend to fix
---         them later, perhaps heuristically, perhaps with human
---         interaction...
+-- Import rows are deliberately left in the caller's staging table.  A
+-- one-sided bank row is not an accounting transaction: it must be classified
+-- with a balancing account before a normal create_xaction call may record it.
 
 CREATE OR REPLACE PROCEDURE import_csv(book VARCHAR, acct1 VARCHAR)
 LANGUAGE plpgsql
 AS $$
-DECLARE
-	t TIMESTAMP;
-	v VARCHAR;
-	value NUMERIC(100,5);
 BEGIN
-
-    FOR t, v, value IN
-	    SELECT
-		CAST(date AS TIMESTAMP) AS t,
-		vendor AS v,
-		CAST(regexp_replace(amt, ',', '', 'g') AS NUMERIC) AS value
-	    FROM import
-	LOOP
-	    CALL create_xaction_nc(book, t, FALSE, ROW(acct1, value, v));
-	END LOOP;
+    RAISE NOTICE 'import rows for %.% remain staged; classify and balance them before recording transactions',
+	book,
+	acct1;
 END;
 $$;

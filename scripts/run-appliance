@@ -1,0 +1,270 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+
+cd "$(dirname "$0")/.."
+
+control_database=${NJORD_CONTROL_DATABASE:-njord}
+github_admin=${NJORD_ADMIN_GITHUB_LOGIN:-}
+database_role=${NJORD_DATABASE_ROLE:-${github_admin:-njord}}
+install_examples=${NJORD_INSTALL_EXAMPLES:-1}
+postgres_user=${POSTGRES_USER:-postgres}
+postgres_listen_addresses=${NJORD_POSTGRES_LISTEN_ADDRESSES:-}
+postgres_pid=
+application_pid=
+broker_pid=
+lifecycle_socket=/run/njord/lifecycle.sock
+
+load_secret()
+{
+	name=$1
+	file_name=${name}_FILE
+	value=${!name:-}
+	secret_file=${!file_name:-}
+	if [[ -n $value && -n $secret_file ]]; then
+		echo "Set either $name or $file_name, not both." >&2
+		exit 2
+	fi
+	if [[ -n $secret_file ]]; then
+		if [[ ! -r $secret_file ]]; then
+			echo "Cannot read $file_name: $secret_file" >&2
+			exit 2
+		fi
+		printf -v "$name" '%s' "$(<"$secret_file")"
+		export "$name"
+	fi
+}
+
+load_secret NJORD_GITHUB_CLIENT_SECRET
+load_secret NJORD_SESSION_SECRET
+load_secret NJORD_POSTGREST_JWT_SECRET
+
+if [[ ! $control_database =~ ^[a-z][a-z0-9_-]{0,62}$ ]]; then
+	echo "Invalid NJORD_CONTROL_DATABASE handle." >&2
+	exit 2
+fi
+if [[ ! $database_role =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]]; then
+	echo "Invalid NJORD_DATABASE_ROLE." >&2
+	exit 2
+fi
+if [[ -n $github_admin && $database_role != "$github_admin" ]]; then
+	echo "NJORD_DATABASE_ROLE must match NJORD_ADMIN_GITHUB_LOGIN." >&2
+	exit 2
+fi
+case "$install_examples" in
+	0) example_books= ;;
+	1) example_books='demo personal uk-business panama-property taiwan-injection' ;;
+	*) echo "NJORD_INSTALL_EXAMPLES must be 0 or 1." >&2; exit 2 ;;
+esac
+case "${NJORD_ALLOW_UNAUTHENTICATED:-0}" in
+	0|1) ;;
+	*) echo "NJORD_ALLOW_UNAUTHENTICATED must be 0 or 1." >&2; exit 2 ;;
+esac
+
+auth_values=${NJORD_GITHUB_CLIENT_ID:-}${NJORD_GITHUB_CLIENT_SECRET:-}${NJORD_PUBLIC_URL:-}${NJORD_SESSION_SECRET:-}${NJORD_POSTGREST_JWT_SECRET:-}
+if [[ -n $auth_values && -z $github_admin ]]; then
+	echo "GitHub authentication in the appliance requires NJORD_ADMIN_GITHUB_LOGIN." >&2
+	exit 2
+fi
+if [[ -z $auth_values && ${NJORD_ALLOW_UNAUTHENTICATED:-0} != 1 ]]; then
+	echo "Refusing to start without GitHub authentication." >&2
+	echo "Use compose.github.yaml, or set NJORD_ALLOW_UNAUTHENTICATED=1 only for an isolated demonstration." >&2
+	exit 2
+fi
+
+# Owner-only initialization uses the local Unix socket. Before the public
+# application starts, pg_hba is tightened so only the postgres-owned lifecycle
+# broker retains this database identity.
+export PGHOST=/var/run/postgresql
+export PGPORT=${PGPORT:-5432}
+export PGUSER=$postgres_user
+export NJORD_CONTROL_DATABASE=$control_database
+export NJORD_DATABASE_ROLE=$database_role
+export NJORD_LOCK_DIR=/run/njord/locks
+install -d -o postgres -g postgres -m 2770 /run/njord /run/njord/locks
+
+as_postgres()
+{
+	gosu postgres env \
+	    PATH="$PATH" HOME=/var/lib/postgresql \
+	    PGHOST="$PGHOST" PGPORT="$PGPORT" PGUSER=postgres \
+	    NJORD_CONTROL_DATABASE="$control_database" \
+	    NJORD_DATABASE_ROLE="$database_role" \
+	    NJORD_GITHUB_API_URL="${NJORD_GITHUB_API_URL:-https://api.github.com}" \
+	    NJORD_LOCK_DIR="$NJORD_LOCK_DIR" \
+	    "$@"
+}
+
+shutdown()
+{
+	status=$?
+	trap - EXIT INT TERM
+	if [[ -n $application_pid ]] && kill -0 "$application_pid" 2>/dev/null; then
+		kill -TERM "$application_pid" 2>/dev/null || true
+		wait "$application_pid" 2>/dev/null || true
+	fi
+	if [[ -n $broker_pid ]] && kill -0 "$broker_pid" 2>/dev/null; then
+		kill -TERM "$broker_pid" 2>/dev/null || true
+		wait "$broker_pid" 2>/dev/null || true
+	fi
+	if [[ -n $postgres_pid ]] && kill -0 "$postgres_pid" 2>/dev/null; then
+		kill -TERM "$postgres_pid" 2>/dev/null || true
+		wait "$postgres_pid" 2>/dev/null || true
+	fi
+	exit "$status"
+}
+trap shutdown EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
+
+# Retain the official PostgreSQL image's initialization and password handling,
+# but supervise it beside the HTTP application rather than replacing PID 1.
+/usr/local/bin/docker-entrypoint.sh postgres \
+	-c "listen_addresses=$postgres_listen_addresses" &
+postgres_pid=$!
+
+postgres_ready=false
+for _attempt in {1..240}; do
+	if pg_isready --quiet --host "$PGHOST" --port "$PGPORT" --username "$PGUSER" --dbname postgres; then
+		postgres_ready=true
+		break
+	fi
+	if ! kill -0 "$postgres_pid" 2>/dev/null; then
+		wait "$postgres_pid"
+		exit $?
+	fi
+	sleep 0.25
+done
+if [[ $postgres_ready != true ]]; then
+	echo "PostgreSQL did not become ready within 60 seconds." >&2
+	exit 1
+fi
+
+control_exists=$(psql -X -d postgres -Atqc \
+	"SELECT 1 FROM pg_database WHERE datname = '$control_database'")
+if [[ $control_exists != 1 ]]; then
+	echo "Initializing Njord control database and Book databases..."
+	as_postgres env NJORD_EXAMPLE_BOOKS="$example_books" scripts/init-development-databases
+fi
+
+# Existing volumes enter only through the ordered migration path. A checksum
+# mismatch, gap, newer schema, incomplete Book, or failed migration aborts
+# startup before PostgREST can serve any request.
+as_postgres scripts/migrate-databases >/dev/null
+
+# Install the fixed PostgREST identities and idempotently regrant every current
+# control/Book connection before the runtime is isolated from the owner role.
+psql -X -v ON_ERROR_STOP=1 -q -d postgres \
+    -v anonymous_role=njord_anonymous \
+    -v authenticator_role=njord_authenticator \
+    -f sql/create-web-runtime-roles.sql >/dev/null
+psql -X -v ON_ERROR_STOP=1 -q -d "$control_database" \
+    -v anonymous_role=njord_anonymous \
+    -v authenticator_role=njord_authenticator \
+    -f sql/grant-control-gateway.sql >/dev/null
+if [[ -z $github_admin ]]; then
+	psql -X -v ON_ERROR_STOP=1 -q -d postgres \
+	    -v database_role="$database_role" \
+	    -v authenticator_role=njord_authenticator \
+	    -f sql/grant-role-to-authenticator.sql >/dev/null
+fi
+while IFS= read -r book; do
+	[[ -n $book ]] || continue
+	psql -X -v ON_ERROR_STOP=1 -q -d "$book" \
+	    -v book_id="$book" -v authenticator_role=njord_authenticator \
+	    -f sql/grant-book-gateway.sql >/dev/null
+done < <(psql -X -qAt -d "$control_database" \
+    -c "SELECT id FROM njord_control.books WHERE provisioning_state = 'ready' ORDER BY id")
+
+# An OAuth installation must have one invited first administrator. Reboots do
+# not depend on GitHub once the invitation or immutable identity already exists.
+if [[ -n $github_admin ]]; then
+	admin_prepared=$(psql -X -d "$control_database" -Atqc "
+		SELECT EXISTS (
+			SELECT 1
+			FROM njord_control.principals AS principal
+			LEFT JOIN njord_control.principal_identities AS identity
+			  ON identity.principal_id = principal.id
+			LEFT JOIN njord_control.github_invitations AS invitation
+			  ON invitation.principal_id = principal.id
+			 AND invitation.revoked_at IS NULL
+			WHERE principal.database_role = '$github_admin'
+			  AND (identity.principal_id IS NOT NULL OR invitation.principal_id IS NOT NULL)
+		)")
+	if [[ $admin_prepared != t ]]; then
+		as_postgres scripts/invite-github-user "$github_admin" --all-books
+	fi
+	psql -X -v ON_ERROR_STOP=1 -q -d "$control_database" \
+	    -v database_role="$github_admin" <<'SQL'
+INSERT INTO njord_control.global_administrators (principal_id, granted_by)
+SELECT principal.id, principal.id
+FROM njord_control.principals AS principal
+WHERE principal.database_role = :'database_role'::NAME
+ON CONFLICT (principal_id) DO NOTHING;
+SQL
+fi
+
+as_postgres env NJORD_POSTGREST_AUTHENTICATOR_ROLE=njord_authenticator \
+    scripts/reconcile-runtime-principals
+
+# After owner-only initialization, peer authentication makes the Unix account
+# the database boundary: the public OS user can become only the authenticator.
+# Root remains an explicit operator identity for `docker compose exec`.
+umask 077
+printf '%s\n' \
+    'njord_owner postgres postgres' \
+    'njord_owner root postgres' \
+    'njord_runtime njord njord_authenticator' >"$PGDATA/pg_ident.conf"
+printf '%s\n' \
+    'local replication postgres peer map=njord_owner' \
+    'local all postgres peer map=njord_owner' \
+    'local all njord_authenticator peer map=njord_runtime' \
+    'local all all reject' \
+    'host all all 127.0.0.1/32 reject' \
+    'host all all ::1/128 reject' >"$PGDATA/pg_hba.conf"
+chmod 0600 "$PGDATA/pg_ident.conf" "$PGDATA/pg_hba.conf"
+chown postgres:postgres "$PGDATA/pg_ident.conf" "$PGDATA/pg_hba.conf"
+psql -X -d postgres -v ON_ERROR_STOP=1 -q -c 'SELECT pg_reload_conf()' >/dev/null
+
+gosu postgres env -i \
+    PATH="$PATH" HOME=/var/lib/postgresql \
+    PGHOST="$PGHOST" PGPORT="$PGPORT" PGUSER=postgres \
+    NJORD_CONTROL_DATABASE="$control_database" \
+    NJORD_POSTGREST_AUTHENTICATOR_ROLE=njord_authenticator \
+    NJORD_LIFECYCLE_BROKER_SOCKET="$lifecycle_socket" \
+    NJORD_LOCK_DIR="$NJORD_LOCK_DIR" \
+    node scripts/lifecycle-broker.mjs &
+broker_pid=$!
+for _attempt in {1..50}; do
+	[[ -S $lifecycle_socket ]] && break
+	kill -0 "$broker_pid" 2>/dev/null || break
+	sleep 0.1
+done
+[[ -S $lifecycle_socket ]] || {
+	echo "Lifecycle broker did not become ready." >&2
+	exit 1
+}
+
+if gosu njord env PGHOST="$PGHOST" PGPORT="$PGPORT" PGUSER=postgres \
+    psql -X -d postgres -Atqc 'SELECT 1' >/dev/null 2>&1; then
+	echo "Runtime OS user can still become the PostgreSQL owner." >&2
+	exit 1
+fi
+gosu njord env PGHOST="$PGHOST" PGPORT="$PGPORT" PGUSER=njord_authenticator \
+    psql -X -d "$control_database" -Atqc 'SELECT current_user' | grep -qx njord_authenticator
+
+echo "Starting the Njord appliance as PostgreSQL role $database_role."
+# PostgreSQL retains its own operating-system account; the HTTP gateway and
+# every PostgREST child run without root privileges.
+env -u PGUSER -u PGPASSWORD \
+    NJORD_RUNTIME_PREPARED=1 \
+    NJORD_LIFECYCLE_BROKER_SOCKET="$lifecycle_socket" \
+    NJORD_LOCK_DIR="$NJORD_LOCK_DIR" \
+    gosu njord scripts/run-development &
+application_pid=$!
+
+set +e
+wait -n "$postgres_pid" "$application_pid" "$broker_pid"
+exit_status=$?
+set -e
+exit "$exit_status"

@@ -1,0 +1,6 @@
+services:
+  njord:
+    environment:
+      NJORD_ALLOW_UNAUTHENTICATED: "1"
+    ports:
+      - "127.0.0.1:${NJORD_HOST_PORT:-8080}:${NJORD_HTTP_PORT:-8080}"

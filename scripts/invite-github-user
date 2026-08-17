@@ -1,0 +1,122 @@
+#!/bin/sh
+
+set -eu
+
+cd "$(dirname "$0")/.."
+
+usage()
+{
+	cat >&2 <<'EOF'
+usage: scripts/invite-github-user GITHUB_LOGIN [--all-books | BOOK_ID ...]
+
+Resolves GitHub's immutable numeric id, creates the matching lowercase
+PostgreSQL LOGIN role, and grants only the selected Njord Books. With no Book
+arguments the user is admitted but cannot see an existing Book.
+EOF
+	exit 2
+}
+
+[ "$#" -ge 1 ] || usage
+
+github_login=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+shift
+membership_role=editor
+all_books=false
+book_ids=
+control_database=${NJORD_CONTROL_DATABASE:-njord}
+psql_bin=${PSQL:-psql}
+github_api_url=${NJORD_GITHUB_API_URL:-https://api.github.com}
+
+if ! printf '%s\n' "$github_login" | grep -Eq '^[a-z0-9]+(-[a-z0-9]+)*$' ||
+   [ "${#github_login}" -gt 39 ]
+then
+	echo "Invalid GitHub login." >&2
+	exit 2
+fi
+
+while [ "$#" -gt 0 ]
+do
+	case "$1" in
+		--all-books)
+			[ "$all_books" = false ] && [ -z "$book_ids" ] || usage
+			all_books=true
+			shift
+			;;
+		--*) usage ;;
+		*)
+			[ "$all_books" = false ] || usage
+			if ! printf '%s\n' "$1" | grep -Eq '^[a-z][a-z0-9_-]{0,62}$'; then
+				echo "Invalid Book database handle: $1" >&2
+				exit 2
+			fi
+			book_ids="$book_ids $1"
+			shift
+			;;
+	esac
+done
+
+github_identity=$(curl -fsS --max-time 10 \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'X-GitHub-Api-Version: 2022-11-28' \
+    -H 'User-Agent: njord-accounting' \
+    "${github_api_url%/}/users/$github_login") || {
+	echo "Could not resolve the GitHub user '$github_login'." >&2
+	exit 1
+}
+
+identity_fields=$(printf '%s' "$github_identity" | node -e '
+let body = "";
+process.stdin.on("data", chunk => { body += chunk; });
+process.stdin.on("end", () => {
+  const user = JSON.parse(body);
+  if (!Number.isSafeInteger(user.id) || user.id <= 0 || typeof user.login !== "string") process.exit(2);
+  process.stdout.write(`${user.id}\n${user.login.toLowerCase()}\n${String(user.name || user.login).replace(/[\r\n]/g, " ")}\n`);
+});
+') || {
+	echo "GitHub returned an invalid identity response." >&2
+	exit 1
+}
+provider_subject=$(printf '%s\n' "$identity_fields" | sed -n '1p')
+resolved_login=$(printf '%s\n' "$identity_fields" | sed -n '2p')
+display_name=$(printf '%s\n' "$identity_fields" | sed -n '3p')
+[ "$resolved_login" = "$github_login" ] || {
+	echo "GitHub resolved '$github_login' as a different login." >&2
+	exit 1
+}
+
+if [ "$all_books" = true ]; then
+	book_ids=$(
+		"$psql_bin" -X -d "$control_database" -Atqc \
+		    "SELECT id FROM njord_control.books WHERE provisioning_state = 'ready' ORDER BY id"
+	)
+fi
+
+for book_id in $book_ids
+do
+	if [ "$("$psql_bin" -X -d "$control_database" -Atqc \
+	    "SELECT count(*) FROM njord_control.books WHERE id = '$book_id' AND provisioning_state = 'ready'")" != 1 ]; then
+		echo "Ready Book not found: $book_id" >&2
+		exit 1
+	fi
+done
+
+"$psql_bin" -X -v ON_ERROR_STOP=1 -q -d postgres \
+    -v database_role="$github_login" -f sql/create-user-role.sql >/dev/null
+"$psql_bin" -X -v ON_ERROR_STOP=1 -q -d postgres \
+    -v database_role="$github_login" -f sql/grant-role-to-authenticator.sql >/dev/null
+"$psql_bin" -X -v ON_ERROR_STOP=1 -q -d "$control_database" \
+    -v control_database="$control_database" -v database_role="$github_login" \
+    -f sql/grant-control-user.sql >/dev/null
+
+book_ids_json=$(node -e 'process.stdout.write(JSON.stringify(process.argv.slice(1)))' $book_ids)
+"$psql_bin" -X -v ON_ERROR_STOP=1 -q -d "$control_database" \
+    -v github_login="$github_login" \
+    -v provider_subject="$provider_subject" \
+    -v display_name="$display_name" \
+    -v expires_at= \
+    -v membership_role="$membership_role" \
+    -v book_ids="$book_ids_json" \
+    -f sql/invite-github-user.sql
+
+printf 'invited GitHub user %s as PostgreSQL role %s (%s access to %s Book(s))\n' \
+    "$github_login" "$github_login" "$membership_role" "$(set -- $book_ids; printf '%s' "$#")"

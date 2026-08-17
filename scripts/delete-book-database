@@ -1,0 +1,44 @@
+#!/bin/sh
+
+set -eu
+
+cd "$(dirname "$0")/.."
+. scripts/acquire-lifecycle-lock
+
+if [ "$#" -ne 2 ]; then
+	echo "usage: scripts/delete-book-database BOOK_ID EXACT_DISPLAY_NAME" >&2
+	exit 2
+fi
+
+book_id=$1
+confirm_name=$2
+control_database=${NJORD_CONTROL_DATABASE:-njord}
+psql_bin=${PSQL:-psql}
+dropdb_bin=${DROPDB:-dropdb}
+
+if ! printf '%s\n' "$book_id" | grep -Eq '^[a-z][a-z0-9_-]{0,62}$'; then
+	echo "Invalid book database handle." >&2
+	exit 2
+fi
+
+case "$book_id" in
+	postgres|template0|template1|"$control_database")
+		echo "Refusing reserved database name: $book_id" >&2
+		exit 2
+		;;
+esac
+
+"$psql_bin" -X -v ON_ERROR_STOP=1 -d "$book_id" \
+    -v book_id="$book_id" -v confirm_name="$confirm_name" \
+    -f sql/check-book-deletion.sql >/dev/null
+
+"$psql_bin" -X -v ON_ERROR_STOP=1 -d "$control_database" \
+    -v book_id="$book_id" -f sql/begin-book-deletion.sql >/dev/null
+
+"$dropdb_bin" --if-exists --force "$book_id"
+
+"$psql_bin" -X -v ON_ERROR_STOP=1 -d "$control_database" \
+    -v book_id="$book_id" -f sql/unregister-book.sql >/dev/null
+
+printf 'deleted book database %s; PostgreSQL cannot recover it without a backup\n' \
+    "$book_id"

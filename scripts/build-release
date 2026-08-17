@@ -1,0 +1,40 @@
+#!/bin/sh
+
+set -eu
+
+cd "$(dirname "$0")/.."
+
+version=${NJORD_RELEASE_VERSION:-}
+case "$version" in
+	''|*[!0-9A-Za-z._-]*)
+		echo 'Set NJORD_RELEASE_VERSION to a non-empty version tag.' >&2
+		exit 2
+		;;
+esac
+
+image=${NJORD_RELEASE_IMAGE:-njord}
+output=${NJORD_SBOM_FILE:-"njord-$version.spdx.json"}
+revision=$(git rev-parse HEAD 2>/dev/null || printf unknown)
+if ! git diff --quiet --ignore-submodules -- 2>/dev/null \
+    || ! git diff --cached --quiet --ignore-submodules -- 2>/dev/null \
+    || [ -n "$(git ls-files --others --exclude-standard 2>/dev/null)" ]
+then
+	revision="$revision-dirty"
+fi
+
+docker build --pull \
+    --label "org.opencontainers.image.version=$version" \
+    --label "org.opencontainers.image.revision=$revision" \
+    --tag "$image:$version" .
+docker image inspect "$image:$version" --format '{{.Id}}' >"$output.image-id"
+docker run --rm --user 0:0 --security-opt label=disable \
+    --volume /var/run/docker.sock:/var/run/docker.sock \
+    anchore/syft@sha256:1288ea4c8b38767b4e620c1e312c8cb26b6e887a99b4f07ab6cd19fc6f225026 \
+    "$image:$version" --output spdx-json >"$output"
+docker run --rm --user 0:0 --security-opt label=disable \
+    --volume /var/run/docker.sock:/var/run/docker.sock \
+    --volume njord-trivy-cache:/root/.cache/ \
+    aquasec/trivy@sha256:cffe3f5161a47a6823fbd23d985795b3ed72a4c806da4c4df16266c02accdd6f \
+    image --exit-code 1 --severity HIGH,CRITICAL "$image:$version"
+
+printf 'release image: %s:%s\nSBOM: %s\n' "$image" "$version" "$output"

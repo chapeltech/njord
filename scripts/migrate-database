@@ -1,0 +1,166 @@
+#!/bin/sh
+
+set -eu
+
+cd "$(dirname "$0")/.."
+. scripts/acquire-lifecycle-lock
+. scripts/schema-versions
+
+usage()
+{
+	cat >&2 <<'EOF'
+usage: scripts/migrate-database [--check] control|book DATABASE
+
+Applies the supported ordered migrations to one Njord database. --check
+performs every compatibility and checksum check without changing anything.
+EOF
+	exit 2
+}
+
+mode=apply
+if [ "${1:-}" = --check ]; then
+	mode=check
+	shift
+fi
+[ "$#" -eq 2 ] || usage
+
+kind=$1
+database=$2
+psql_bin=${PSQL:-psql}
+
+case "$kind" in
+	control)
+		schema=njord_control
+		expected_version=$CONTROL_SCHEMA_VERSION
+		fingerprint="to_regclass('njord_control.books') IS NOT NULL AND to_regclass('njord_control.web_sessions') IS NOT NULL AND to_regprocedure('api.shell_page(character varying)') IS NOT NULL"
+		;;
+	book)
+		schema=njord
+		expected_version=$BOOK_SCHEMA_VERSION
+		fingerprint="to_regclass('public.books') IS NOT NULL AND to_regclass('public.xaction_bits') IS NOT NULL AND to_regprocedure('api.adapter_status()') IS NOT NULL AND (SELECT count(*) = 1 AND min(id) = current_database() FROM public.books)"
+		;;
+	*) usage ;;
+esac
+
+if ! printf '%s\n' "$database" | grep -Eq '^[a-z][a-z0-9_-]{0,62}$'; then
+	echo "Invalid database handle: $database" >&2
+	exit 2
+fi
+
+migration_dir=sql/migrations/$kind
+latest=0
+for migration in "$migration_dir"/[0-9][0-9][0-9][0-9]-*.sql; do
+	[ -f "$migration" ] || {
+		echo "No $kind migrations found." >&2
+		exit 1
+	}
+	prefix=${migration##*/}
+	prefix=${prefix%%-*}
+	version=$(printf '%s' "$prefix" | sed 's/^0*//')
+	[ -n "$version" ] || version=0
+	if [ "$version" -ne $((latest + 1)) ]; then
+		echo "Migration sequence is not contiguous at $migration." >&2
+		exit 1
+	fi
+	latest=$version
+done
+
+if [ "$latest" -ne "$expected_version" ]; then
+	echo "$kind migration catalogue ends at $latest; product expects $expected_version." >&2
+	exit 1
+fi
+
+ledger_exists=$(
+	"$psql_bin" -X -v ON_ERROR_STOP=1 -d "$database" -Atqc \
+	    "SELECT to_regclass('$schema.schema_migrations') IS NOT NULL"
+)
+
+if [ "$ledger_exists" != t ]; then
+	if [ "${NJORD_ALLOW_LEGACY_ADOPTION:-0}" != 1 ]; then
+		echo "$database has no $kind migration ledger; refusing implicit legacy adoption." >&2
+		echo "Use a documented installer, or set NJORD_ALLOW_LEGACY_ADOPTION=1 after verifying the database and taking a backup." >&2
+		exit 1
+	fi
+	legacy=$(
+		"$psql_bin" -X -v ON_ERROR_STOP=1 -d "$database" -Atqc \
+		    "SELECT COALESCE(($fingerprint), FALSE)"
+	)
+	if [ "$legacy" != t ]; then
+		echo "$database is neither a supported legacy $kind database nor a versioned one." >&2
+		exit 1
+	fi
+	current=0
+else
+	ledger_summary=$(
+		"$psql_bin" -X -v ON_ERROR_STOP=1 -d "$database" -Atq \
+		    -F '|' -c "SELECT count(*), COALESCE(min(version), 0), COALESCE(max(version), 0) FROM $schema.schema_migrations"
+	)
+	IFS='|' read -r migration_count minimum current <<EOF
+$ledger_summary
+EOF
+	if [ "$migration_count" -eq 0 ] || [ "$minimum" -ne 1 ] || [ "$migration_count" -ne "$current" ]; then
+		echo "$database has a partial or non-contiguous $kind migration ledger; restore a known-good backup." >&2
+		exit 1
+	fi
+	if [ "$current" -gt "$expected_version" ]; then
+		echo "$database schema version $current is newer than this application ($expected_version)." >&2
+		exit 1
+	fi
+fi
+
+for migration in "$migration_dir"/[0-9][0-9][0-9][0-9]-*.sql; do
+	filename=${migration##*/}
+	prefix=${filename%%-*}
+	version=$(printf '%s' "$prefix" | sed 's/^0*//')
+	[ -n "$version" ] || version=0
+	name=${filename%.sql}
+	checksum=$(sha256sum "$migration" | cut -d' ' -f1)
+
+	if [ "$version" -le "$current" ]; then
+		recorded=$(
+			"$psql_bin" -X -v ON_ERROR_STOP=1 -d "$database" -Atq -F '|' \
+			    -c "SELECT name, checksum FROM $schema.schema_migrations WHERE version = $version"
+		)
+		if [ "$recorded" != "$name|$checksum" ]; then
+			echo "$database migration $version does not match the shipped name and checksum." >&2
+			exit 1
+		fi
+		continue
+	fi
+
+	if [ "$mode" = check ]; then
+		echo "$database requires $kind migration $version ($name)." >&2
+		exit 1
+	fi
+
+	echo "Migrating $database ($kind) to $version: $name" >&2
+	"$psql_bin" -X -v ON_ERROR_STOP=1 -d "$database" \
+	    -v migration_version="$version" \
+	    -v migration_name="$name" \
+	    -v migration_checksum="$checksum" >/dev/null <<SQL
+BEGIN;
+SELECT pg_advisory_xact_lock(
+    hashtextextended('njord-schema-migration', 0)
+);
+\i $migration
+INSERT INTO $schema.schema_migrations (version, name, checksum)
+VALUES (
+    :'migration_version'::INTEGER,
+    :'migration_name',
+    :'migration_checksum'
+);
+COMMIT;
+SQL
+	current=$version
+done
+
+final=$(
+	"$psql_bin" -X -v ON_ERROR_STOP=1 -d "$database" -Atqc \
+	    "SELECT max(version) FROM $schema.schema_migrations"
+)
+if [ "$final" != "$expected_version" ]; then
+	echo "$database migration finished at $final, expected $expected_version." >&2
+	exit 1
+fi
+
+printf '%s %s schema is current at version %s\n' "$database" "$kind" "$final"
