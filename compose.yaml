@@ -2,7 +2,7 @@ name: ${NJORD_COMPOSE_PROJECT:-njord}
 
 services:
   njord:
-    image: ${NJORD_IMAGE:-njord:0.1.0}
+    image: ${NJORD_IMAGE:-ghcr.io/chapeltech/njord:latest}
     build:
       context: .
     restart: unless-stopped

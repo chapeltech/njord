@@ -56,7 +56,8 @@ chmod 0600 secrets/postgres_password
 docker network create njord-edge
 
 # Set NJORD_INSTALL_EXAMPLES=1 in .env, then:
-docker compose -f compose.yaml -f compose.local.yaml up --build -d
+docker compose -f compose.yaml -f compose.local.yaml pull njord
+docker compose -f compose.yaml -f compose.local.yaml up --no-build -d
 ```
 
 Open `http://127.0.0.1:8080/`. The examples cover a large personal ledger, a UK
@@ -87,7 +88,8 @@ evidence; it is not an official-return generator or regulatory adviser.
 - `curl`, `sha256sum`, and `xz` for the pinned PostgREST installer
 - `age` on the operator host for production backup-key generation and verification
 
-The project pins PostgREST 14.16. On Linux x86-64, install it locally with:
+The project pins PostgREST 14.16. On Linux x86-64, install it locally for
+source-tree development with:
 
 ```sh
 scripts/install-postgrest
@@ -100,17 +102,41 @@ platform is not Linux x86-64.
 
 The appliance image contains PostgreSQL 18, PostgREST 14.16, Node.js 22, the
 gateway, and the compiled Elm UI. One volume holds the entire PostgreSQL
-cluster: the control database and every physical Book database. The current
-pinned PostgREST appliance build targets Linux x86-64.
+cluster: the control database and every physical Book database. The published
+image is a multi-platform OCI image for Linux AMD64 and ARM64, including
+AArch64 machines such as AWS Graviton and 64-bit Raspberry Pi systems.
+
+GitHub Actions publishes `ghcr.io/chapeltech/njord`. A push to `master`
+updates `latest` and a source-SHA tag; tags such as `v0.1.0` additionally
+publish `v0.1.0`, `0.1.0`, and `0.1`. Every image includes OCI provenance and
+an SBOM. The canonical deployment files are:
+
+- [compose.yaml](compose.yaml), the hardened appliance and durable volume;
+- [compose.github.yaml](compose.github.yaml), GitHub OAuth secrets; and
+- [.env.example](.env.example), the documented configuration surface.
+
+Download those files without cloning the source repository:
 
 ```sh
+curl -fsSLO https://raw.githubusercontent.com/chapeltech/njord/master/compose.yaml
+curl -fsSLO https://raw.githubusercontent.com/chapeltech/njord/master/compose.github.yaml
+curl -fsSLO https://raw.githubusercontent.com/chapeltech/njord/master/.env.example
 cp .env.example .env
+```
+
+If the GHCR package is private, log in once with a GitHub token carrying
+`read:packages` before pulling. Then prepare the installation:
+
+```sh
 install -d -m 0700 secrets
 openssl rand -hex 32 >secrets/postgres_password
 chmod 0600 secrets/postgres_password
 docker network create njord-edge
-docker compose build
+docker compose -f compose.yaml -f compose.github.yaml pull njord
 ```
+
+To build the current checkout instead, run `docker compose build`; production
+hosts should pull a version tag or immutable digest and use `--no-build`.
 
 The base Compose file publishes no host ports. It attaches the service alias
 `njord` to the external network named by `NJORD_DOCKER_NETWORK`; attach the
@@ -300,7 +326,7 @@ their own isolated PostgREST processes directly.
 
 | Setting | Meaning |
 | --- | --- |
-| `NJORD_IMAGE` | Immutable appliance image/tag to run. |
+| `NJORD_IMAGE` | Appliance image/tag to run; defaults to the published GHCR `latest` image. Pin a version or digest for production. |
 | `NJORD_HTTP_PORT` | Unprivileged plain-HTTP port (1024–65535) inside the shared Docker network. |
 | `NJORD_DOCKER_NETWORK` | Existing external network shared with nginx. |
 | `NJORD_NETWORK_ALIAS` | DNS name nginx uses for the Njord service. |
@@ -347,7 +373,8 @@ openssl rand -hex 32 >secrets/postgrest_jwt_secret
 chmod 0600 secrets/github_client_secret secrets/session_secret \
   secrets/postgrest_jwt_secret
 
-docker compose -f compose.yaml -f compose.github.yaml up --build -d
+docker compose -f compose.yaml -f compose.github.yaml pull njord
+docker compose -f compose.yaml -f compose.github.yaml up --no-build -d
 ```
 
 The declared administrator is resolved against GitHub during first boot,
@@ -720,7 +747,8 @@ GitHub alone is replaced by a deterministic local protocol fixture.
   invoice VAT. Unsupported configurations fail closed.
 - PostgreSQL 18 physical backups restore to PostgreSQL 18. Cross-major upgrades
   require a separately designed and rehearsed logical migration.
-- Linux x86-64 is the current pinned PostgREST appliance target.
+- Published appliance images support Linux AMD64 and ARM64. Other CPU
+  architectures are not currently built or tested.
 - The source currently has no granted open-source licence; see **Licence**.
 
 ## Contributing

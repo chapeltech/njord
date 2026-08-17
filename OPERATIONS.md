@@ -5,6 +5,12 @@ These runbooks cover the supported public deployment: `compose.yaml` plus
 private Docker network. The commands intentionally omit `compose.local.yaml`;
 that overlay enables unauthenticated loopback demonstration mode.
 
+`.github/workflows/publish-container.yaml` publishes the multi-platform
+`ghcr.io/chapeltech/njord` image for Linux AMD64 and ARM64. Every `master` push
+updates `latest` and a source-SHA tag. A `vX.Y.Z` tag also publishes the
+corresponding version tags. The registry image carries BuildKit provenance and
+an SPDX SBOM.
+
 ## Release Gate
 
 Run this gate for the exact committed revision and immutable image that will be
@@ -31,15 +37,22 @@ deployed:
 
    ```sh
    NJORD_RELEASE_VERSION=0.1.0 \
-   NJORD_RELEASE_IMAGE=registry.example/njord \
+   NJORD_RELEASE_IMAGE=ghcr.io/chapeltech/njord \
      scripts/build-release
-   docker push registry.example/njord:0.1.0
    ```
 
-4. Retain the generated SPDX JSON SBOM and `.image-id` beside the release
+4. For a versioned release, tag the exact reviewed commit and push only that
+   tag. The GitHub Actions workflow builds and publishes the registry manifest:
+
+   ```sh
+   git tag -a v0.1.0 -m 'Njord 0.1.0'
+   git push origin v0.1.0
+   ```
+
+5. Retain the generated local SPDX JSON SBOM and `.image-id` beside the release
    record. Record the immutable registry digest, source revision, test results,
-   scanner result, and the operator who approved deployment.
-5. Rehearse the deployment on a clean staging volume, complete GitHub login,
+   scanner result, workflow run, and the operator who approved deployment.
+6. Rehearse the deployment on a clean staging volume, complete GitHub login,
    create and edit a Book, run a representative report, make an encrypted
    backup, and restore it into another clean volume. Do not waive the restore
    rehearsal merely because backup creation succeeded.
