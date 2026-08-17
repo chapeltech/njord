@@ -1,6 +1,6 @@
 # Njord Operations
 
-These runbooks cover the supported public deployment: `compose.yaml` plus
+These runbooks cover the supported public deployment: `docker-compose.yml` plus
 `compose.github.yaml`, with an operator-managed HTTPS nginx proxy on the shared
 private Docker network. The commands intentionally omit `compose.local.yaml`;
 that overlay enables unauthenticated loopback demonstration mode.
@@ -68,23 +68,20 @@ version—not a fictional upgrade from an earlier release.
 1. Install Docker Engine with Compose v2 and `age`; restrict membership of the
    host's Docker group to installation administrators.
 2. Set `NJORD_IMAGE` in `.env` to the approved immutable image tag or digest,
-   leave `NJORD_INSTALL_EXAMPLES=0` and
-   `NJORD_ALLOW_UNAUTHENTICATED=0`, and choose durable values for
-   `NJORD_DATA_VOLUME` and `NJORD_CONTROL_DATABASE`. Do not rename those
-   after initialization.
-3. Create the external Docker network and the four mode-0600 service secret
+   leave `NJORD_INSTALL_EXAMPLES=0`, and choose a durable
+   `NJORD_DATA_VOLUME`. Do not rename that volume after initialization.
+3. Create the external Docker network and the three mode-0600 service secret
    files. Secret values do not belong in `.env`:
 
    ```sh
    cp .env.example .env
    chmod 0600 .env
    install -d -m 0700 secrets
-   openssl rand -hex 32 >secrets/postgres_password
    openssl rand -hex 32 >secrets/session_secret
    openssl rand -hex 32 >secrets/postgrest_jwt_secret
    # Write the GitHub OAuth App secret to secrets/github_client_secret.
-   chmod 0600 secrets/postgres_password secrets/github_client_secret \
-     secrets/session_secret secrets/postgrest_jwt_secret
+   chmod 0600 secrets/github_client_secret secrets/session_secret \
+     secrets/postgrest_jwt_secret
    docker network create njord-edge
    ```
 
@@ -101,11 +98,11 @@ version—not a fictional upgrade from an earlier release.
    authenticated overlay without rebuilding it on the server:
 
    ```sh
-   docker compose -f compose.yaml -f compose.github.yaml config --quiet
-   docker compose -f compose.yaml -f compose.github.yaml pull njord
-   docker compose -f compose.yaml -f compose.github.yaml up --no-build -d
-   docker compose -f compose.yaml -f compose.github.yaml ps
-   docker compose -f compose.yaml -f compose.github.yaml logs --tail=200 njord
+   docker compose -f docker-compose.yml -f compose.github.yaml config --quiet
+   docker compose -f docker-compose.yml -f compose.github.yaml pull njord
+   docker compose -f docker-compose.yml -f compose.github.yaml up --no-build -d
+   docker compose -f docker-compose.yml -f compose.github.yaml ps
+   docker compose -f docker-compose.yml -f compose.github.yaml logs --tail=200 njord
    ```
 
 7. Require a healthy container and successful readiness through nginx:
@@ -113,8 +110,8 @@ version—not a fictional upgrade from an earlier release.
    ```sh
    curl --fail --silent --show-error https://accounts.example.com/readyz
    docker inspect --format '{{.State.Health.Status}}' \
-     "$(docker compose -f compose.yaml -f compose.github.yaml ps -q njord)"
-   docker compose -f compose.yaml -f compose.github.yaml exec -T \
+     "$(docker compose -f docker-compose.yml -f compose.github.yaml ps -q njord)"
+   docker compose -f docker-compose.yml -f compose.github.yaml exec -T \
      -e PGUSER=postgres njord scripts/migrate-databases --check
    ```
 
@@ -147,7 +144,7 @@ request supplies a shell command or database connection string.
    ```sh
    install -d -m 0700 backups
    backup="backups/njord-$(date -u +%Y%m%dT%H%M%SZ).tar.gz.age"
-   docker compose -f compose.yaml -f compose.github.yaml exec -T \
+   docker compose -f docker-compose.yml -f compose.github.yaml exec -T \
      -e PGUSER=postgres njord scripts/backup-cluster-encrypted \
      "$(cat secrets/backup_age_recipient)" >"$backup"
    test -s "$backup"
@@ -178,7 +175,7 @@ major version. Never restore over the current volume.
 1. Stop Njord, retain the old volume, and create a new explicitly named one:
 
    ```sh
-   docker compose -f compose.yaml -f compose.github.yaml stop njord
+   docker compose -f docker-compose.yml -f compose.github.yaml stop njord
    docker volume create njord-restored-data
    ```
 
@@ -202,8 +199,8 @@ major version. Never restore over the current volume.
    overlays, and validate the durable migration ledgers:
 
    ```sh
-   docker compose -f compose.yaml -f compose.github.yaml up --no-build -d
-   docker compose -f compose.yaml -f compose.github.yaml exec -T \
+   docker compose -f docker-compose.yml -f compose.github.yaml up --no-build -d
+   docker compose -f docker-compose.yml -f compose.github.yaml exec -T \
      -e PGUSER=postgres njord scripts/migrate-databases --check
    ```
 
@@ -250,11 +247,11 @@ fresh loaders over durable data.
   plus database growth and connection pressure:
 
   ```sh
-  docker compose -f compose.yaml -f compose.github.yaml exec -T \
+  docker compose -f docker-compose.yml -f compose.github.yaml exec -T \
     -e PGUSER=postgres njord psql -X -d postgres -c \
     "SELECT datname, pg_size_pretty(pg_database_size(datname)) AS size
        FROM pg_database WHERE datallowconn ORDER BY pg_database_size(datname) DESC"
-  docker compose -f compose.yaml -f compose.github.yaml exec -T \
+  docker compose -f docker-compose.yml -f compose.github.yaml exec -T \
     -e PGUSER=postgres njord psql -X -d postgres -c \
     "SELECT datname, count(*) AS connections
        FROM pg_stat_activity GROUP BY datname ORDER BY connections DESC"
@@ -279,9 +276,9 @@ fresh loaders over durable data.
 
    ```sh
    install -d -m 0700 incident
-   docker compose -f compose.yaml -f compose.github.yaml logs \
+   docker compose -f docker-compose.yml -f compose.github.yaml logs \
      --no-color --timestamps njord >incident/njord.log
-   docker inspect "$(docker compose -f compose.yaml -f compose.github.yaml \
+   docker inspect "$(docker compose -f docker-compose.yml -f compose.github.yaml \
      ps -q njord)" >incident/njord-container.json
    ```
 
@@ -296,7 +293,7 @@ fresh loaders over durable data.
    all browser sessions may be exposed, revoke them from the control database:
 
    ```sh
-   docker compose -f compose.yaml -f compose.github.yaml exec -T \
+   docker compose -f docker-compose.yml -f compose.github.yaml exec -T \
      -e PGUSER=postgres njord psql -X -d njord -v ON_ERROR_STOP=1 -c \
      "UPDATE njord_control.web_sessions
          SET revoked_at = clock_timestamp()
@@ -328,12 +325,6 @@ fresh loaders over durable data.
   adapters agree, and test control and Book calls. Old internal claims expire
   after their 60-second lifetime; browser sessions need not be discarded unless
   the incident also exposed them.
-- **PostgreSQL password:** `secrets/postgres_password` bootstraps only a new
-  cluster. Replacing the file does not change roles in an existing volume. The
-  supported Compose topology exposes no PostgreSQL TCP listener. An operator
-  who deliberately adds direct network SQL must rotate the affected role
-  verifier with `ALTER ROLE`, require TLS plus SCRAM or client certificates, and
-  update clients independently.
 - **Age identity:** generate a new identity off-host, install only its recipient
   on the server, and use it for new backups. Keep each old private identity until
   all backups encrypted to it have expired or been decrypted and re-encrypted.

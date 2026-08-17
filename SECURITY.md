@@ -7,7 +7,7 @@ financial records.
 
 ## Supported deployment
 
-The supported public deployment is `compose.yaml` plus
+The supported public deployment is `docker-compose.yml` plus
 `compose.github.yaml`, behind an operator-managed HTTPS nginx reverse proxy on
 a private Docker network. Only nginx is public. The Njord HTTP listener uses
 plain HTTP on that private network; PostgreSQL and every PostgREST listener are
@@ -76,11 +76,10 @@ transaction. Re-enabling restores only catalogue memberships that still
 exist. Revoking an unaccepted GitHub invitation blocks OAuth admission; use
 global disable when direct-SQL access must also be removed.
 
-Direct SQL is deliberately supported, but PostgreSQL is not exposed by the
-Compose files. An operator who exposes it must require TLS and SCRAM or client
-certificates at the network boundary, set credentials independently, and
-grant no role beyond those maintained by Njord. A Book role never grants
-control of another Book.
+The appliance disables PostgreSQL IP networking and accepts only its explicit
+peer-authenticated Unix-socket identities. Network SQL is future work and, if
+added, must use GSSAPI or mutual TLS rather than passwords. A Book role never
+grants control of another Book.
 
 ## Request and process controls
 
@@ -126,9 +125,9 @@ therefore run only as an explicit trusted-operator release step, never inside
 the public service.
 
 The container has a read-only root filesystem, writable tmpfs runtime
-directories, no new privileges, a bounded PID/resource budget, and only the
-Linux capabilities required by the PostgreSQL entrypoint to adopt the
-persistent volume and drop privileges. PostgreSQL and the lifecycle broker run
+directories, no new privileges, and only the Linux capabilities required by
+the PostgreSQL entrypoint to adopt the persistent volume and drop privileges.
+PostgreSQL and the lifecycle broker run
 as OS user `postgres`. The HTTP application and every PostgREST process run as
 OS user `njord`; peer authentication allows that account to connect only as
 the non-owner database role `njord_authenticator`.
@@ -136,7 +135,7 @@ the non-owner database role `njord_authenticator`.
 ## Backup and incident handling
 
 A physical backup contains the whole cluster, including accounting records,
-identity metadata, password verifiers, and roles. Use
+identity metadata, and roles. Use
 `scripts/backup-cluster-encrypted` with an age recipient; it never writes a
 plaintext archive. Store its private identity separately, restrict both to the
 minimum operators, keep an off-host copy, and test decryption and clean-volume

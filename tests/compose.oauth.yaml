@@ -20,7 +20,7 @@ services:
     volumes:
       - ./tests/fake-github.mjs:/test/fake-github.mjs:ro,Z
     networks:
-      edge:
+      default:
         aliases:
           - github
     healthcheck:

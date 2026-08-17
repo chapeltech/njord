@@ -1,0 +1,33 @@
+name: ${NJORD_COMPOSE_PROJECT:-njord}
+
+services:
+  njord:
+    image: ${NJORD_IMAGE:-ghcr.io/chapeltech/njord:latest}
+    build: .
+    restart: unless-stopped
+    stop_grace_period: 30s
+    environment:
+      NJORD_ADMIN_GITHUB_LOGIN: ${NJORD_ADMIN_GITHUB_LOGIN:-}
+      NJORD_ALLOW_UNAUTHENTICATED: ${NJORD_ALLOW_UNAUTHENTICATED:-0}
+      NJORD_GITHUB_CLIENT_ID: ${NJORD_GITHUB_CLIENT_ID:-}
+      NJORD_INSTALL_EXAMPLES: ${NJORD_INSTALL_EXAMPLES:-0}
+      NJORD_PUBLIC_URL: ${NJORD_PUBLIC_URL:-}
+      NJORD_UI_PORT: ${NJORD_HTTP_PORT:-8080}
+    volumes:
+      - njord_data:/var/lib/postgresql
+    read_only: true
+    tmpfs:
+      - /run:rw,nosuid,nodev,size=32m,mode=0755
+      - /tmp:rw,nosuid,nodev,size=128m,mode=1777
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, KILL, SETGID, SETUID]
+    security_opt: [no-new-privileges:true]
+
+volumes:
+  njord_data:
+    name: ${NJORD_DATA_VOLUME:-njord-data}
+
+networks:
+  default:
+    name: ${NJORD_DOCKER_NETWORK:-njord-edge}
+    external: true

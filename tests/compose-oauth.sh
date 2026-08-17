@@ -17,7 +17,7 @@ nginx_project="njord-oauth-nginx-$test_id"
 network="njord-oauth-edge-$test_id"
 volume="njord-oauth-data-$test_id"
 image=${NJORD_COMPOSE_OAUTH_TEST_IMAGE:-njord:compose-oauth-test}
-app_compose=(docker compose -f compose.yaml -f compose.github.yaml -f tests/compose.oauth.yaml)
+app_compose=(docker compose -f docker-compose.yml -f compose.github.yaml -f tests/compose.oauth.yaml)
 nginx_compose=(docker compose -f tests/compose.nginx.yaml)
 internal_port=18083
 
@@ -38,7 +38,6 @@ cleanup()
 trap cleanup EXIT HUP INT TERM
 
 umask 077
-printf '%s\n' 'compose-oauth-postgres-password' >"$temporary/postgres_password"
 printf '%s\n' 'compose-oauth-client-secret' >"$temporary/github_client_secret"
 printf '%s\n' 'compose-oauth-session-secret-00000000000000000000000000000001' >"$temporary/session_secret"
 printf '%s\n' 'compose-oauth-postgrest-jwt-secret-0000000000000000000000000001' >"$temporary/postgrest_jwt_secret"
@@ -50,7 +49,6 @@ export NJORD_DOCKER_NETWORK=$network
 export NJORD_HTTP_PORT=$internal_port
 export NJORD_IMAGE=$image
 export NJORD_INSTALL_EXAMPLES=0
-export NJORD_POSTGRES_PASSWORD_FILE=$temporary/postgres_password
 export NJORD_GITHUB_CLIENT_SECRET_FILE=$temporary/github_client_secret
 export NJORD_SESSION_SECRET_FILE=$temporary/session_secret
 export NJORD_POSTGREST_JWT_SECRET_FILE=$temporary/postgrest_jwt_secret

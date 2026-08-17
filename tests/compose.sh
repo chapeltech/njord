@@ -17,7 +17,7 @@ network="njord-test-edge-$test_id"
 volume="njord-test-data-$test_id"
 image=${NJORD_COMPOSE_TEST_IMAGE:-njord:compose-test}
 internal_port=18082
-compose="docker compose -f compose.yaml"
+compose="docker compose -f docker-compose.yml"
 sentinel_marker="njord-build-secret-sentinel-$test_id"
 sentinel_env=".env.njord-build-sentinel-$test_id"
 sentinel_secret="secrets/.njord-build-sentinel-$test_id"
@@ -43,7 +43,6 @@ umask 077
 if [ ! -d secrets ]; then mkdir secrets; created_secrets_directory=true; fi
 printf '%s\n' "$sentinel_marker" >"$sentinel_env"
 printf '%s\n' "$sentinel_marker" >"$sentinel_secret"
-printf '%s\n' 'compose-test-postgres-password' >"$temporary/postgres_password"
 
 export NJORD_COMPOSE_PROJECT=$project
 export NJORD_DATA_VOLUME=$volume
@@ -52,7 +51,6 @@ export NJORD_HTTP_PORT=$internal_port
 export NJORD_IMAGE=$image
 export NJORD_INSTALL_EXAMPLES=0
 export NJORD_ALLOW_UNAUTHENTICATED=1
-export NJORD_POSTGRES_PASSWORD_FILE=$temporary/postgres_password
 
 docker network create "$network" >/dev/null
 case "${NJORD_COMPOSE_TEST_BUILD:-1}" in
@@ -111,6 +109,20 @@ if docker exec --user njord -e PGHOST=/var/run/postgresql -e PGUSER=postgres \
 	echo "unprivileged application user can authenticate as PostgreSQL owner" >&2
 	exit 1
 fi
+listen_addresses=$($compose exec -T -e PGHOST=/var/run/postgresql -e PGUSER=postgres \
+    njord psql -X -d postgres -Atqc 'SHOW listen_addresses')
+[ -z "$listen_addresses" ] || {
+	echo "PostgreSQL IP networking is enabled: $listen_addresses" >&2
+	exit 1
+}
+if $compose exec -T njord pg_isready --quiet --host 127.0.0.1 --port 5432; then
+	echo "PostgreSQL unexpectedly accepts TCP connections" >&2
+	exit 1
+fi
+postgres_has_no_password=$($compose exec -T -e PGHOST=/var/run/postgresql -e PGUSER=postgres \
+    njord psql -X -d postgres -Atqc \
+    "SELECT rolpassword IS NULL FROM pg_authid WHERE rolname = 'postgres'")
+[ "$postgres_has_no_password" = t ]
 
 port_bindings=$(docker inspect --format '{{json .HostConfig.PortBindings}}' "$container_id")
 case "$port_bindings" in
@@ -240,9 +252,16 @@ SQL
 
 # Version 1 is the first production baseline. A same-version replacement must
 # restart without rewriting either migration ledger.
+$compose exec -T -e PGHOST=/var/run/postgresql -e PGUSER=postgres \
+    njord psql -X -d postgres -q \
+    -c "ALTER ROLE postgres PASSWORD 'obsolete-bootstrap-verifier'" >/dev/null
 $compose restart njord >/dev/null
 container_id=$($compose ps --quiet njord)
 wait_healthy
+postgres_has_no_password=$($compose exec -T -e PGHOST=/var/run/postgresql -e PGUSER=postgres \
+    njord psql -X -d postgres -Atqc \
+    "SELECT rolpassword IS NULL FROM pg_authid WHERE rolname = 'postgres'")
+[ "$postgres_has_no_password" = t ]
 
 reconciled_principal=$($compose exec -T -e PGHOST=/var/run/postgresql -e PGUSER=postgres \
     njord psql -X -d njord -Atqc \

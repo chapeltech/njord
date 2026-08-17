@@ -101,9 +101,11 @@ A separate immutable principal UUID keeps Book membership and audit history
 stable across those external changes.
 
 Web authentication maps a verified external identity to the person's role;
-PostgREST then uses `SET LOCAL ROLE`. Direct SQL logs in as the same role.
-Consequently `current_user` identifies the same person and reaches the same
-SQL constraints and authorization rules through both paths.
+PostgREST then uses `SET LOCAL ROLE`. Local development SQL uses the same role.
+Consequently `current_user` identifies the same person and reaches the same SQL
+constraints and authorization rules through both paths. The appliance disables
+PostgreSQL IP networking. Future network SQL must use GSSAPI or mutual TLS, not
+password authentication.
 
 Human roles are never superusers, never own product objects, and have
 `NOCREATEDB`, `NOCREATEROLE`, `NOREPLICATION`, and `NOBYPASSRLS`. The trusted
@@ -545,10 +547,12 @@ not a merger of responsibilities. PostgreSQL is the only durable component and
 stores the control database plus all Book databases in one mounted cluster
 volume. The container entrypoint initializes an empty volume once, starts the
 processes in dependency order, and forwards shutdown so HTTP and adapters drain
-before PostgreSQL stops. PostgreSQL and the lifecycle broker run as OS user
-`postgres`; the gateway and all PostgREST processes run as OS user `njord`,
-whose local peer mapping permits only the database login
-`njord_authenticator`. Public TLS termination remains outside the appliance.
+before PostgreSQL stops. PostgreSQL listens only on its private Unix socket and
+has no superuser password; host records reject IP connections defensively.
+PostgreSQL and the lifecycle broker run as OS user `postgres`; the gateway and
+all PostgREST processes run as OS user `njord`, whose local peer mapping permits
+only the database login `njord_authenticator`. Public TLS termination remains
+outside the appliance.
 
 ## Schema Evolution and Recovery
 

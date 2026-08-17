@@ -9,7 +9,6 @@ github_admin=${NJORD_ADMIN_GITHUB_LOGIN:-}
 database_role=${NJORD_DATABASE_ROLE:-${github_admin:-njord}}
 install_examples=${NJORD_INSTALL_EXAMPLES:-1}
 postgres_user=${POSTGRES_USER:-postgres}
-postgres_listen_addresses=${NJORD_POSTGRES_LISTEN_ADDRESSES:-}
 postgres_pid=
 application_pid=
 broker_pid=
@@ -95,6 +94,24 @@ as_postgres()
 	    "$@"
 }
 
+configure_postgres_authentication()
+{
+	umask 077
+	printf '%s\n' \
+	    'njord_owner postgres postgres' \
+	    'njord_owner root postgres' \
+	    'njord_runtime njord njord_authenticator' >"$PGDATA/pg_ident.conf"
+	printf '%s\n' \
+	    'local replication postgres peer map=njord_owner' \
+	    'local all postgres peer map=njord_owner' \
+	    'local all njord_authenticator peer map=njord_runtime' \
+	    'local all all reject' \
+	    'host all all 0.0.0.0/0 reject' \
+	    'host all all ::0/0 reject' >"$PGDATA/pg_hba.conf"
+	chmod 0600 "$PGDATA/pg_ident.conf" "$PGDATA/pg_hba.conf"
+	chown postgres:postgres "$PGDATA/pg_ident.conf" "$PGDATA/pg_hba.conf"
+}
+
 shutdown()
 {
 	status=$?
@@ -117,10 +134,24 @@ trap shutdown EXIT
 trap 'exit 143' TERM
 trap 'exit 130' INT
 
-# Retain the official PostgreSQL image's initialization and password handling,
-# but supervise it beside the HTTP application rather than replacing PID 1.
-/usr/local/bin/docker-entrypoint.sh postgres \
-	-c "listen_addresses=$postgres_listen_addresses" &
+# Reuse the official image's volume ownership and old-layout checks, but own
+# initialization so a socket-only appliance never needs a database password.
+unset POSTGRES_PASSWORD POSTGRES_PASSWORD_FILE POSTGRES_HOST_AUTH_METHOD PGPASSWORD
+source /usr/local/bin/docker-entrypoint.sh
+docker_setup_env
+docker_create_db_directories
+if [[ -z $DATABASE_ALREADY_EXISTS ]]; then
+	docker_error_old_databases
+	as_postgres initdb --username="$postgres_user" \
+	    --auth-local=peer --auth-host=reject --data-checksums
+fi
+configure_postgres_authentication
+
+# PostgreSQL has no IP listener. All owner and application connections use the
+# private Unix socket and the explicit operating-system identity mappings above.
+as_postgres postgres \
+	-c 'listen_addresses=' \
+	-c "unix_socket_directories=$PGHOST" &
 postgres_pid=$!
 
 postgres_ready=false
@@ -139,6 +170,11 @@ if [[ $postgres_ready != true ]]; then
 	echo "PostgreSQL did not become ready within 60 seconds." >&2
 	exit 1
 fi
+
+# Volumes initialized by the earlier published image may retain its one-time
+# bootstrap verifier. Socket peer authentication makes it unnecessary.
+psql -X -d postgres -v ON_ERROR_STOP=1 -q \
+    -c 'ALTER ROLE postgres PASSWORD NULL' >/dev/null
 
 control_exists=$(psql -X -d postgres -Atqc \
 	"SELECT 1 FROM pg_database WHERE datname = '$control_database'")
@@ -206,25 +242,6 @@ fi
 
 as_postgres env NJORD_POSTGREST_AUTHENTICATOR_ROLE=njord_authenticator \
     scripts/reconcile-runtime-principals
-
-# After owner-only initialization, peer authentication makes the Unix account
-# the database boundary: the public OS user can become only the authenticator.
-# Root remains an explicit operator identity for `docker compose exec`.
-umask 077
-printf '%s\n' \
-    'njord_owner postgres postgres' \
-    'njord_owner root postgres' \
-    'njord_runtime njord njord_authenticator' >"$PGDATA/pg_ident.conf"
-printf '%s\n' \
-    'local replication postgres peer map=njord_owner' \
-    'local all postgres peer map=njord_owner' \
-    'local all njord_authenticator peer map=njord_runtime' \
-    'local all all reject' \
-    'host all all 127.0.0.1/32 reject' \
-    'host all all ::1/128 reject' >"$PGDATA/pg_hba.conf"
-chmod 0600 "$PGDATA/pg_ident.conf" "$PGDATA/pg_hba.conf"
-chown postgres:postgres "$PGDATA/pg_ident.conf" "$PGDATA/pg_hba.conf"
-psql -X -d postgres -v ON_ERROR_STOP=1 -q -c 'SELECT pg_reload_conf()' >/dev/null
 
 gosu postgres env -i \
     PATH="$PATH" HOME=/var/lib/postgresql \
