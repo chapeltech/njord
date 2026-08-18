@@ -47,6 +47,7 @@ export NJORD_NGINX_TEST_PROJECT=$nginx_project
 export NJORD_DATA_VOLUME=$volume
 export NJORD_DOCKER_NETWORK=$network
 export NJORD_HTTP_PORT=$internal_port
+export NJORD_HOST_PORT=0
 export NJORD_IMAGE=$image
 export NJORD_INSTALL_EXAMPLES=0
 export NJORD_GITHUB_CLIENT_SECRET_FILE=$temporary/github_client_secret
@@ -59,10 +60,11 @@ export NJORD_DATABASE_ROLE=
 
 docker network create "$network" >/dev/null
 case "${NJORD_COMPOSE_OAUTH_TEST_BUILD:-1}" in
-	0) "${app_compose[@]}" up --no-build --detach ;;
-	1) "${app_compose[@]}" up --build --detach ;;
+	0) ;;
+	1) docker build --tag "$image" . ;;
 	*) echo "NJORD_COMPOSE_OAUTH_TEST_BUILD must be 0 or 1." >&2; exit 2 ;;
 esac
+"${app_compose[@]}" up --no-build --detach
 "${nginx_compose[@]}" up --detach
 
 container_id=$("${app_compose[@]}" ps --quiet njord)
@@ -80,6 +82,18 @@ done
 	echo "OAuth appliance did not become healthy: $state" >&2
 	exit 1
 }
+
+docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container_id" |
+	grep -qx 'NJORD_ALLOW_UNAUTHENTICATED=0'
+direct_port=$("${app_compose[@]}" port njord "$internal_port" | sed 's/.*://')
+direct_status=$(curl --silent --show-error --max-time 60 \
+	--output /dev/null --write-out '%{http_code}' \
+	--header 'Content-Type: application/json' --data '{}' \
+	"http://127.0.0.1:$direct_port/api/control/rpc/shell_page")
+case "$direct_status" in
+	4??) ;;
+	*) echo "direct gateway request returned HTTP $direct_status, expected a 4xx denial" >&2; exit 1 ;;
+esac
 
 nginx_port=$("${nginx_compose[@]}" port nginx 8080 | sed 's/.*://')
 origin="http://127.0.0.1:$nginx_port"

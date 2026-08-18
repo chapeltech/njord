@@ -11,8 +11,10 @@ The supported public deployment is `docker-compose.yml` plus
 `compose.github.yaml`, behind an operator-managed HTTPS nginx reverse proxy on
 a private Docker network. Only nginx is public. The Njord HTTP listener uses
 plain HTTP on that private network; PostgreSQL and every PostgREST listener are
-bound inside the appliance and are not published. The unauthenticated local
-overlay is for loopback demonstrations and is not a public deployment mode.
+bound inside the appliance and are not publicly exposed. Compose also
+publishes the gateway on a configurable loopback-only port. Setting
+`NJORD_ALLOW_UNAUTHENTICATED=1` is solely for local demonstrations and is not a
+public deployment mode.
 
 The host administrator, Docker daemon, appliance root entrypoint, PostgreSQL
 superuser, and anyone holding a backup decryption identity are trusted. Anyone

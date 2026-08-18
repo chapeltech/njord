@@ -1,6 +1,7 @@
 services:
   njord:
     environment:
+      NJORD_ALLOW_UNAUTHENTICATED: "0"
       NJORD_GITHUB_CLIENT_SECRET_FILE: /run/secrets/github_client_secret
       NJORD_POSTGREST_JWT_SECRET_FILE: /run/secrets/postgrest_jwt_secret
       NJORD_SESSION_SECRET_FILE: /run/secrets/session_secret

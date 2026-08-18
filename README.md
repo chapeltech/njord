@@ -22,13 +22,20 @@ Install Docker with Compose v2, then:
 ```sh
 cp .env.example .env
 docker network create njord-edge
-docker compose -f docker-compose.yml -f compose.local.yaml pull njord
-NJORD_INSTALL_EXAMPLES=1 \
-  docker compose -f docker-compose.yml -f compose.local.yaml up --no-build -d
+docker compose pull njord
+NJORD_INSTALL_EXAMPLES=1 NJORD_ALLOW_UNAUTHENTICATED=1 \
+  docker compose up --no-build -d
 ```
 
 Open `http://127.0.0.1:8080`. This local mode is deliberately unauthenticated;
 never expose it to the Internet. Data persists in the `njord-data` volume.
+
+Anonymous pulls require the GHCR package to be public. For a private package,
+log in first with a classic GitHub token carrying `read:packages`:
+
+```sh
+printf '%s' "$CR_PAT" | docker login ghcr.io -u YOUR-GITHUB-LOGIN --password-stdin
+```
 
 ## GitHub authentication
 

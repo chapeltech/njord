@@ -48,16 +48,18 @@ export NJORD_COMPOSE_PROJECT=$project
 export NJORD_DATA_VOLUME=$volume
 export NJORD_DOCKER_NETWORK=$network
 export NJORD_HTTP_PORT=$internal_port
+export NJORD_HOST_PORT=0
 export NJORD_IMAGE=$image
 export NJORD_INSTALL_EXAMPLES=0
 export NJORD_ALLOW_UNAUTHENTICATED=1
 
 docker network create "$network" >/dev/null
 case "${NJORD_COMPOSE_TEST_BUILD:-1}" in
-	0) $compose up --no-build --detach ;;
-	1) $compose up --build --detach ;;
+	0) ;;
+	1) docker build --tag "$image" . ;;
 	*) echo "NJORD_COMPOSE_TEST_BUILD must be 0 or 1." >&2; exit 2 ;;
 esac
+$compose up --no-build --detach
 
 docker run --rm --entrypoint sh -e NJORD_SENTINEL="$sentinel_marker" "$image" -c \
     'if grep -R -F "$NJORD_SENTINEL" /opt/njord >/dev/null 2>&1; then exit 1; fi'
@@ -124,11 +126,16 @@ postgres_has_no_password=$($compose exec -T -e PGHOST=/var/run/postgresql -e PGU
     "SELECT rolpassword IS NULL FROM pg_authid WHERE rolname = 'postgres'")
 [ "$postgres_has_no_password" = t ]
 
-port_bindings=$(docker inspect --format '{{json .HostConfig.PortBindings}}' "$container_id")
-case "$port_bindings" in
-	'{}'|'null') ;;
-	*) echo "base Compose deployment unexpectedly publishes host ports: $port_bindings" >&2; exit 1 ;;
-esac
+published_ips=$(docker inspect --format \
+    '{{range $bindings := .NetworkSettings.Ports}}{{range $bindings}}{{println .HostIp}}{{end}}{{end}}' \
+    "$container_id")
+[ "$published_ips" = 127.0.0.1 ] || {
+	echo "base Compose deployment must publish only one loopback port: $published_ips" >&2
+	exit 1
+}
+host_port=$($compose port njord "$internal_port" | sed 's/.*://')
+host_health=$(curl --fail --silent --show-error "http://127.0.0.1:$host_port/healthz")
+[ "$host_health" = ok ]
 
 health=$(docker run --rm --network "$network" --entrypoint curl "$image" \
     --fail --silent --show-error "http://njord:$internal_port/healthz")

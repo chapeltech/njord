@@ -2,8 +2,9 @@
 
 These runbooks cover the supported public deployment: `docker-compose.yml` plus
 `compose.github.yaml`, with an operator-managed HTTPS nginx proxy on the shared
-private Docker network. The commands intentionally omit `compose.local.yaml`;
-that overlay enables unauthenticated loopback demonstration mode.
+private Docker network. The base file publishes only a loopback port;
+unauthenticated demonstration mode requires the explicit
+`NJORD_ALLOW_UNAUTHENTICATED=1` setting.
 
 `.github/workflows/publish-container.yaml` publishes the multi-platform
 `ghcr.io/chapeltech/njord` image for Linux AMD64 and ARM64. Every `master` push
