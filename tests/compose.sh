@@ -154,7 +154,7 @@ book_count=$($compose exec -T -e PGHOST=/var/run/postgresql -e PGUSER=postgres \
 [ "$book_count" = 0 ]
 control_version=$($compose exec -T -e PGHOST=/var/run/postgresql -e PGUSER=postgres \
     njord psql -X -d njord -Atqc 'SELECT max(version) FROM njord_control.schema_migrations')
-[ "$control_version" = 1 ]
+[ "$control_version" = 2 ]
 
 # Explicit legacy adoption is serialized by the cluster lifecycle lock. Two
 # installers may discover an unversioned baseline together, but they must
@@ -178,7 +178,7 @@ wait "$adopt_one"
 wait "$adopt_two"
 adopted_ledger=$($compose exec -T -e PGHOST=/var/run/postgresql -e PGUSER=postgres \
     njord psql -X -d compose-adoption -Atqc \
-    'SELECT count(*) = 1 AND min(version) = 1 AND max(version) = 1 FROM njord.schema_migrations')
+    'SELECT count(*) = 2 AND min(version) = 1 AND max(version) = 2 FROM njord.schema_migrations')
 [ "$adopted_ledger" = t ]
 $compose exec -T -e PGHOST=/var/run/postgresql -e PGUSER=postgres \
     njord dropdb compose-adoption
@@ -197,7 +197,32 @@ physical_book=$($compose exec -T -e PGHOST=/var/run/postgresql -e PGUSER=postgre
 
 book_version=$($compose exec -T -e PGHOST=/var/run/postgresql -e PGUSER=postgres \
     njord psql -X -d compose-persist -Atqc 'SELECT max(version) FROM njord.schema_migrations')
-[ "$book_version" = 1 ]
+[ "$book_version" = 2 ]
+
+# Rehearse an upgrade of an existing version 1 volume. Fresh installers have
+# already loaded the current vocabulary, so remove exactly the version 2 data
+# and ledger entries before restarting through the ordinary migration path.
+$compose exec -T -e PGHOST=/var/run/postgresql -e PGUSER=postgres \
+    njord psql -X -v ON_ERROR_STOP=1 -q -d njord >/dev/null <<'SQL'
+DELETE FROM presentation.messages WHERE semantic_key = 'nav.help';
+DELETE FROM njord_control.schema_migrations WHERE version = 2;
+SQL
+$compose exec -T -e PGHOST=/var/run/postgresql -e PGUSER=postgres \
+    njord psql -X -v ON_ERROR_STOP=1 -q -d compose-persist >/dev/null <<'SQL'
+DELETE FROM presentation.messages WHERE semantic_key = 'nav.help';
+DELETE FROM njord.schema_migrations WHERE version = 2;
+SQL
+$compose restart njord >/dev/null
+container_id=$($compose ps --quiet njord)
+wait_healthy
+upgraded_versions=$($compose exec -T -e PGHOST=/var/run/postgresql -e PGUSER=postgres \
+    njord sh -c "psql -X -d njord -Atqc 'SELECT max(version) FROM njord_control.schema_migrations'; psql -X -d compose-persist -Atqc 'SELECT max(version) FROM njord.schema_migrations'")
+[ "$upgraded_versions" = "2
+2" ]
+upgraded_labels=$($compose exec -T -e PGHOST=/var/run/postgresql -e PGUSER=postgres \
+    njord sh -c "psql -X -d njord -Atqc \"SELECT string_agg(locale || ':' || display_text, ',' ORDER BY locale) FROM presentation.messages WHERE semantic_key = 'nav.help'\"; psql -X -d compose-persist -Atqc \"SELECT string_agg(locale || ':' || display_text, ',' ORDER BY locale) FROM presentation.messages WHERE semantic_key = 'nav.help'\"")
+[ "$upgraded_labels" = "en-GB:Help,es-PA:Ayuda,zh-TW:說明
+en-GB:Help,es-PA:Ayuda,zh-TW:說明" ]
 $compose exec -T -e PGHOST=/var/run/postgresql -e PGUSER=postgres \
     njord scripts/migrate-databases --check >/dev/null
 
@@ -255,7 +280,7 @@ END
 $block$;
 SQL
 
-# Version 1 is the first production baseline. A same-version replacement must
+# Version 1 is the first production baseline. A version 2 replacement must
 # restart without rewriting either migration ledger.
 $compose exec -T -e PGHOST=/var/run/postgresql -e PGUSER=postgres \
     njord psql -X -d postgres -q \
@@ -284,8 +309,8 @@ physical_lifecycle=$($compose exec -T -e PGHOST=/var/run/postgresql -e PGUSER=po
 
 upgraded_versions=$($compose exec -T -e PGHOST=/var/run/postgresql -e PGUSER=postgres \
     njord sh -c "psql -X -d njord -Atqc 'SELECT max(version) FROM njord_control.schema_migrations'; psql -X -d compose-persist -Atqc 'SELECT max(version) FROM njord.schema_migrations'")
-[ "$upgraded_versions" = "1
-1" ]
+[ "$upgraded_versions" = "2
+2" ]
 
 $compose up --detach --force-recreate >/dev/null
 container_id=$($compose ps --quiet njord)
@@ -468,7 +493,7 @@ $compose exec -T -e PGHOST=/var/run/postgresql -e PGUSER=postgres \
     "UPDATE njord_control.schema_migrations SET checksum = '$original_checksum' WHERE version = 1" >/dev/null
 $compose exec -T -e PGHOST=/var/run/postgresql -e PGUSER=postgres \
     njord psql -X -d njord -Atqc \
-    "INSERT INTO njord_control.schema_migrations VALUES (2, 'future', repeat('1', 64), clock_timestamp())" >/dev/null
+    "INSERT INTO njord_control.schema_migrations VALUES (3, 'future', repeat('1', 64), clock_timestamp())" >/dev/null
 if $compose exec -T -e PGHOST=/var/run/postgresql -e PGUSER=postgres \
     njord scripts/migrate-databases --check >"$temporary/future.log" 2>&1; then
 	echo 'newer database schema was accepted' >&2
@@ -477,7 +502,7 @@ fi
 grep -q 'newer than this application' "$temporary/future.log"
 $compose exec -T -e PGHOST=/var/run/postgresql -e PGUSER=postgres \
     njord psql -X -d njord -Atqc \
-    'DELETE FROM njord_control.schema_migrations WHERE version = 2' >/dev/null
+    'DELETE FROM njord_control.schema_migrations WHERE version = 3' >/dev/null
 
 # A legacy-looking database with no ledger is never silently adopted.
 $compose exec -T -e PGHOST=/var/run/postgresql -e PGUSER=postgres \

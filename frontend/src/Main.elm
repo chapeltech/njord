@@ -4302,6 +4302,15 @@ viewNavigation model =
                             (scopedRoute ReportsPage)
                         ]
                    )
+                ++ [ Html.a
+                        [ Attr.href "https://github.com/chapeltech/njord/wiki"
+                        , Attr.class "workspace-tab"
+                        , Attr.target "_blank"
+                        , Attr.rel "noopener noreferrer"
+                        , Attr.attribute "aria-current" "false"
+                        ]
+                        [ Html.text (presentationText model "nav.help") ]
+                   ]
             )
         , case activeBook of
             Just book ->

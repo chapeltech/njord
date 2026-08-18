@@ -202,6 +202,7 @@ assert_not_contains "shell page omits page-specific account choices" "$shell" '"
 assert_not_contains "shell page omits page-specific report choices" "$shell" '"component":"report_option"'
 assert_contains "shell page includes SQL-owned presentation vocabulary" "$shell" '"component":"presentation"'
 assert_contains "shell page resolves navigation labels in SQL" "$shell" '"key": "nav.accounts", "text": "Accounts"'
+assert_contains "shell page resolves Help in SQL" "$shell" '"key": "nav.help", "text": "Help"'
 assert_contains "shell page exposes SQL-owned language choices" "$shell" '"component":"language_option"'
 assert_contains "shell page exposes the UK flag" "$shell" '"flag": "🇬🇧"'
 assert_not_contains "shell account choices exclude placeholder roots" "$shell" '"row_key":"Assets"'
@@ -211,6 +212,7 @@ spanish_shell=$("$CURL" -fsS -X POST "$BASE/rpc/shell_page" \
     -H 'accept-language: es-PA' \
     -d '{}')
 assert_contains "Accept-Language selects SQL-owned Panamanian Spanish" "$spanish_shell" '"key": "nav.accounts", "text": "Cuentas", "locale": "es-PA"'
+assert_contains "Spanish includes SQL-owned Help" "$spanish_shell" '"key": "nav.help", "text": "Ayuda", "locale": "es-PA"'
 assert_contains "Spanish includes SQL-owned Book help" "$spanish_shell" '"key": "help.book.identity", "text": "El identificador es permanente.'
 
 chinese_shell=$("$CURL" -fsS -X POST "$BASE/rpc/shell_page" \
@@ -218,6 +220,7 @@ chinese_shell=$("$CURL" -fsS -X POST "$BASE/rpc/shell_page" \
     -H 'accept-language: zh-TW' \
     -d '{}')
 assert_contains "Accept-Language selects SQL-owned Traditional Chinese" "$chinese_shell" '"key": "nav.accounts", "text": "科目", "locale": "zh-TW"'
+assert_contains "Chinese includes SQL-owned Help" "$chinese_shell" '"key": "nav.help", "text": "說明", "locale": "zh-TW"'
 assert_contains "Chinese includes SQL-owned status vocabulary" "$chinese_shell" '"key": "status.transaction.saving", "text": "正在儲存交易"'
 assert_contains "Chinese includes SQL-owned chart accessibility text" "$chinese_shell" '"key": "aria.chart.bar", "text": "長條圖。{summary}"'
 

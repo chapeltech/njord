@@ -66,6 +66,7 @@ WITH vocabulary(semantic_key, "en-GB", "es-PA", "zh-TW") AS (
         ('nav.journal', 'Journal', 'Diario', '日記帳'),
         ('nav.reconciliation', 'Reconciliation', 'Conciliación', '對帳'),
         ('nav.reports', 'Reports', 'Informes', '報表'),
+        ('nav.help', 'Help', 'Ayuda', '說明'),
         ('option.book.select', 'Select book', 'Seleccionar libro', '選擇帳簿'),
         ('option.book.add', 'Add book…', 'Agregar libro…', '新增帳簿…'),
         ('option.account.select', 'Select account', 'Seleccionar cuenta', '選擇科目'),

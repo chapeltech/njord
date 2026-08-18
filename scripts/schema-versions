@@ -1,4 +1,4 @@
 # Current persistent database contracts. Migration filenames are validated
 # against these values by scripts/migrate-database.
-CONTROL_SCHEMA_VERSION=1
-BOOK_SCHEMA_VERSION=1
+CONTROL_SCHEMA_VERSION=2
+BOOK_SCHEMA_VERSION=2

@@ -85,7 +85,7 @@ const main = createServer(async (request, response) => {
   for await (const chunk of request) chunks.push(chunk);
   if (request.url === "/rpc/slow_page") await new Promise((done) => setTimeout(done, 500));
   const result = request.url === "/rpc/adapter_status"
-    ? [{ database: book, schema_version: 1 }]
+    ? [{ database: book, schema_version: 2 }]
     : [{ component: "book_result", payload: { book } }];
   response.writeHead(200, { "content-type": "application/json" });
   response.end(JSON.stringify(result));

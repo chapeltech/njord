@@ -175,9 +175,13 @@ try {
   );
   const primaryDestinationLabels = await topbar.locator("a.workspace-tab").allTextContents();
   assert(
-    JSON.stringify(primaryDestinationLabels) === JSON.stringify(["Admin", "Books"]),
+    JSON.stringify(primaryDestinationLabels) === JSON.stringify(["Admin", "Books", "Help"]),
     `unscoped destinations are ${primaryDestinationLabels.join(" -> ")}`,
   );
+  const helpLink = primaryDestination("Help");
+  assert(await helpLink.getAttribute("href") === "https://github.com/chapeltech/njord/wiki", "Help does not link to the Njord wiki");
+  assert(await helpLink.getAttribute("target") === "_blank", "Help can replace a dirty application tab");
+  assert(await helpLink.getAttribute("rel") === "noopener noreferrer", "Help opener is not isolated");
   assert(await primaryDestination("Admin").getAttribute("href") === "/?page=admin", "Admin is attached to a Book URL");
   assert(await topbar.getByRole("link", { name: "Accounts", exact: true }).count() === 0, "Books exposes Accounts");
   assert(await topbar.getByRole("link", { name: "Journal", exact: true }).count() === 0, "Books exposes Journal");
@@ -210,6 +214,7 @@ try {
   await languageMenu.getByRole("menuitemradio").nth(1).click();
   await spanishRequest;
   await page.getByRole("heading", { name: "Libros", exact: true }).waitFor();
+  assert(await primaryDestination("Ayuda").count() === 1, "Help did not follow the SQL-owned Spanish vocabulary");
   assert(await page.evaluate(() => localStorage.getItem("njord.language")) === "es-PA", "Spanish choice was not persisted");
   assert(await page.locator("html").getAttribute("lang") === "es-PA", "document language did not follow Spanish choice");
 

@@ -84,7 +84,7 @@ try {
     const body = await readBody(incoming);
     events.push({ adapter: "book", url: incoming.url, body });
     const result = incoming.url === "/rpc/adapter_status"
-      ? [{ database: "trusted-book", schema_version: 1 }]
+      ? [{ database: "trusted-book", schema_version: 2 }]
       : [{ component: "book_result", payload: JSON.parse(body) }];
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify(result));

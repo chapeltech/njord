@@ -58,11 +58,11 @@ deployed:
    backup, and restore it into another clean volume. Do not waive the restore
    rehearsal merely because backup creation succeeded.
 
-The first production database contract is schema version 1 for both control
-and Book databases. It has no supported production predecessor. The acceptance
-suite therefore tests fresh installation, repeated same-version startup,
-controlled concurrent adoption of installer output, and refusal of a future
-version—not a fictional upgrade from an earlier release.
+Schema version 1 is the first supported production baseline. Version 2 is
+current for both control and Book databases and adds the SQL-owned Help label.
+The acceptance suite tests fresh installation, a version 1 to 2 upgrade,
+repeated same-version startup, controlled concurrent adoption of installer
+output, and refusal of a future version.
 
 ## Deployment Checklist
 

@@ -5133,6 +5133,9 @@ SELECT pg_temp.assert_true(
     )
     AND presentation.text('entity.company', 'es') = 'Empresa'
     AND presentation.text('entity.company', 'zh') = '公司'
+    AND presentation.text('nav.help', 'en') = 'Help'
+    AND presentation.text('nav.help', 'es') = 'Ayuda'
+    AND presentation.text('nav.help', 'zh') = '說明'
 );
 
 SELECT pg_temp.assert_true(
