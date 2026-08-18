@@ -2112,3 +2112,354 @@ $$;
 
 COMMENT ON FUNCTION panama_report_rows(VARCHAR, VARCHAR, TIMESTAMP, TIMESTAMP, TIMESTAMP) IS
     'Normalized Panama business and residential-property fact summaries for the generic SQL-defined report renderer; never a filing submission.';
+
+-- Optional Panama settings are emitted only for ledgers whose reporting asset
+-- can support the pack. The browser renders these database-owned components;
+-- it does not decide jurisdiction eligibility or configuration completeness.
+CREATE OR REPLACE FUNCTION api.panama_book_components(p_book_id VARCHAR)
+RETURNS SETOF api.page_component
+LANGUAGE SQL
+STABLE
+AS $$
+    WITH configuration AS (
+	SELECT
+	    books.id AS book_id,
+	    books.name AS book_name,
+	    profile.book_id IS NOT NULL AS profile_enabled,
+	    profile.legal_name,
+	    profile.ruc,
+	    profile.verification_digit,
+	    profile.legal_form,
+	    profile.municipality,
+	    profile.incorporated_on,
+	    profile.resident_agent,
+	    profile.registered_address,
+	    profile.operations_notice_number,
+	    profile.itbms_registered,
+	    profile.conducts_lodging_activity,
+	    profile.notes,
+	    property_profile.book_id IS NOT NULL AS property_enabled,
+	    (
+		SELECT count(*)::INTEGER
+		FROM public.panama_properties
+		WHERE panama_properties.book_id = books.id
+	    ) AS property_count,
+	    EXISTS (
+		SELECT 1 FROM public.panama_fiscal_periods AS period
+		WHERE period.book_id = books.id
+	    ) AS has_period
+	FROM public.books
+	JOIN public.book_entity_types AS entity_types
+	  ON entity_types.id = books.entity_type
+	LEFT JOIN public.panama_business_profiles AS profile
+	  ON profile.book_id = books.id
+	LEFT JOIN public.panama_residential_property_profiles AS property_profile
+	  ON property_profile.book_id = books.id
+	WHERE books.id = p_book_id
+	  AND entity_types.allows_business_packs
+	  AND books.reporting_asset IN ('PAB', 'USD')
+    )
+    SELECT
+	'panama_business_profile'::VARCHAR,
+	12500::BIGINT,
+	configuration.book_id,
+	jsonb_build_object(
+	    'enabled', configuration.profile_enabled,
+	    'legal_name', COALESCE(
+		configuration.legal_name, configuration.book_name
+	    ),
+	    'ruc', COALESCE(configuration.ruc, ''),
+	    'verification_digit', configuration.verification_digit,
+	    'legal_form', COALESCE(configuration.legal_form, 'corporation'),
+	    'municipality', COALESCE(
+		configuration.municipality, 'panama_district'
+	    ),
+	    'incorporated_on', configuration.incorporated_on,
+	    'resident_agent', configuration.resident_agent,
+	    'registered_address', configuration.registered_address,
+	    'operations_notice_number',
+		configuration.operations_notice_number,
+	    'itbms_registered', COALESCE(
+		configuration.itbms_registered, FALSE
+	    ),
+	    'conducts_lodging_activity', COALESCE(
+		configuration.conducts_lodging_activity, FALSE
+	    ),
+	    'residential_property_enabled',
+		configuration.property_enabled,
+	    'property_count', configuration.property_count,
+	    'notes', configuration.notes
+	)
+    FROM configuration
+UNION ALL
+    SELECT
+	'configuration_check'::VARCHAR,
+	12600::BIGINT,
+	'panama_profile'::VARCHAR,
+	njord.configuration_check_payload(
+	    'panama_profile',
+	    'Panama business profile',
+	    configuration.profile_enabled,
+	    CASE WHEN configuration.profile_enabled THEN NULL
+		ELSE 'Save the Panama business settings to enable its working papers.' END
+	)
+    FROM configuration
+UNION ALL
+    SELECT
+	'configuration_check'::VARCHAR,
+	12601::BIGINT,
+	'panama_period'::VARCHAR,
+	njord.configuration_check_payload(
+	    'panama_period',
+	    'Fiscal period',
+	    configuration.profile_enabled AND configuration.has_period,
+	    CASE
+		WHEN NOT configuration.profile_enabled THEN
+		    'Save the business profile first.'
+		WHEN NOT configuration.has_period THEN
+		    'Add one fiscal period.'
+		ELSE NULL
+	    END
+	)
+    FROM configuration
+UNION ALL
+    SELECT
+	'configuration_check'::VARCHAR,
+	12602::BIGINT,
+	'panama_property'::VARCHAR,
+	njord.configuration_check_payload(
+	    'panama_property',
+	    'Residential property extension',
+	    configuration.property_enabled
+		AND configuration.property_count > 0,
+	    CASE
+		WHEN NOT configuration.property_enabled THEN
+		    'Optional; enable it only for a residential-property business.'
+		WHEN configuration.property_count = 0 THEN
+		    'Add a property before opening property-specific reports.'
+		ELSE NULL
+	    END
+	)
+    FROM configuration
+UNION ALL
+    SELECT
+	'panama_legal_form_option'::VARCHAR,
+	12700 + row_number() OVER (ORDER BY legal_forms.label, legal_forms.id),
+	legal_forms.id,
+	njord.labelled_option_payload(legal_forms.id, legal_forms.label)
+    FROM public.panama_legal_forms AS legal_forms
+    WHERE EXISTS (SELECT 1 FROM configuration)
+UNION ALL
+    SELECT
+	'panama_municipality_option'::VARCHAR,
+	12800 + row_number() OVER (
+	    ORDER BY municipalities.label, municipalities.id
+	),
+	municipalities.id,
+	njord.labelled_option_payload(municipalities.id, municipalities.label)
+    FROM public.panama_municipalities AS municipalities
+    WHERE EXISTS (SELECT 1 FROM configuration)
+UNION ALL
+    SELECT
+	'panama_period_status_option'::VARCHAR,
+	12900 + row_number() OVER (
+	    ORDER BY period_statuses.label, period_statuses.id
+	),
+	period_statuses.id,
+	njord.labelled_option_payload(period_statuses.id, period_statuses.label)
+    FROM public.panama_period_statuses AS period_statuses
+    WHERE EXISTS (SELECT 1 FROM configuration)
+UNION ALL
+    SELECT
+	'panama_fiscal_period'::VARCHAR,
+	13000 + row_number() OVER (
+	    ORDER BY periods.period_start DESC, periods.id
+	),
+	periods.id,
+	jsonb_build_object(
+	    'id', periods.id,
+	    'period_start', periods.period_start,
+	    'period_end', periods.period_end,
+	    'status', periods.status,
+	    'income_tax_return_due_on', periods.income_tax_return_due_on,
+	    'municipal_return_due_on', periods.municipal_return_due_on,
+	    'notes', periods.notes
+	)
+    FROM public.panama_fiscal_periods AS periods
+    WHERE periods.book_id = p_book_id;
+$$;
+
+-- Configure the small bookkeeping seam for a Panamanian business. The RPC
+-- stores identity and one explicit fiscal period, creates only the ordinary
+-- account roots, and optionally enables the residential-property data model.
+-- It does not infer filing obligations or calculate a return.
+CREATE OR REPLACE FUNCTION api.configure_panama_business(
+    p_book_id VARCHAR,
+    p_legal_name VARCHAR,
+    p_ruc VARCHAR,
+    p_legal_form VARCHAR,
+    p_municipality VARCHAR,
+    p_period_id VARCHAR,
+    p_period_start DATE,
+    p_period_end DATE,
+    p_verification_digit VARCHAR DEFAULT NULL,
+    p_incorporated_on DATE DEFAULT NULL,
+    p_resident_agent VARCHAR DEFAULT NULL,
+    p_registered_address VARCHAR DEFAULT NULL,
+    p_operations_notice_number VARCHAR DEFAULT NULL,
+    p_itbms_registered BOOLEAN DEFAULT FALSE,
+    p_conducts_lodging_activity BOOLEAN DEFAULT FALSE,
+    p_enable_residential_property BOOLEAN DEFAULT FALSE,
+    p_notes VARCHAR DEFAULT NULL,
+    p_period_status VARCHAR DEFAULT 'open',
+    p_income_tax_return_due_on DATE DEFAULT NULL,
+    p_municipal_return_due_on DATE DEFAULT NULL,
+    p_period_notes VARCHAR DEFAULT NULL
+)
+RETURNS SETOF api.page_component
+LANGUAGE plpgsql
+VOLATILE
+AS $$
+DECLARE
+    normalized_legal_name VARCHAR := NULLIF(btrim(p_legal_name), '');
+    normalized_ruc VARCHAR := NULLIF(btrim(p_ruc), '');
+    normalized_legal_form VARCHAR := NULLIF(btrim(p_legal_form), '');
+    normalized_municipality VARCHAR := NULLIF(btrim(p_municipality), '');
+    normalized_period_id VARCHAR := NULLIF(btrim(p_period_id), '');
+    normalized_period_status VARCHAR := COALESCE(
+	NULLIF(btrim(p_period_status), ''), 'open'
+    );
+    reporting_asset VARCHAR;
+BEGIN
+    reporting_asset := njord.lock_book_reporting_asset(p_book_id);
+
+    IF reporting_asset NOT IN ('PAB', 'USD') THEN
+	RAISE EXCEPTION 'Panama business configuration requires a PAB or USD book'
+	    USING ERRCODE = 'P0001',
+		  DETAIL = 'PANAMA_BUSINESS_REQUIRES_PAB_OR_USD';
+    END IF;
+
+    UPDATE public.books
+    SET entity_type = CASE
+	WHEN normalized_legal_form = 'sole_proprietor' THEN 'sole_trader'
+	ELSE 'company'
+    END
+    WHERE id = p_book_id AND entity_type = 'household';
+
+    IF normalized_legal_name IS NULL THEN
+	RAISE EXCEPTION 'business legal name is required'
+	    USING ERRCODE = 'P0001', DETAIL = 'BUSINESS_LEGAL_NAME_REQUIRED';
+    END IF;
+
+    IF normalized_ruc IS NULL THEN
+	RAISE EXCEPTION 'RUC is required'
+	    USING ERRCODE = 'P0001', DETAIL = 'PANAMA_RUC_REQUIRED';
+    END IF;
+
+    IF normalized_legal_form IS NULL OR NOT EXISTS (
+	SELECT 1 FROM public.panama_legal_forms
+	WHERE panama_legal_forms.id = normalized_legal_form
+    ) THEN
+	RAISE EXCEPTION 'Panama legal form does not exist'
+	    USING ERRCODE = 'P0001', DETAIL = 'PANAMA_LEGAL_FORM_NOT_FOUND';
+    END IF;
+
+    IF normalized_municipality IS NULL OR NOT EXISTS (
+	SELECT 1 FROM public.panama_municipalities
+	WHERE panama_municipalities.id = normalized_municipality
+    ) THEN
+	RAISE EXCEPTION 'Panama municipality does not exist'
+	    USING ERRCODE = 'P0001', DETAIL = 'PANAMA_MUNICIPALITY_NOT_FOUND';
+    END IF;
+
+    IF normalized_period_id IS NULL THEN
+	RAISE EXCEPTION 'fiscal period id is required'
+	    USING ERRCODE = 'P0001', DETAIL = 'FISCAL_PERIOD_ID_REQUIRED';
+    END IF;
+
+    IF p_period_start IS NULL OR p_period_end IS NULL THEN
+	RAISE EXCEPTION 'fiscal period dates are required'
+	    USING ERRCODE = 'P0001', DETAIL = 'FISCAL_PERIOD_DATES_REQUIRED';
+    END IF;
+
+    IF p_period_start > p_period_end THEN
+	RAISE EXCEPTION 'fiscal period starts after it ends'
+	    USING ERRCODE = 'P0001', DETAIL = 'INVALID_FISCAL_PERIOD';
+    END IF;
+
+    IF NOT EXISTS (
+	SELECT 1 FROM public.panama_period_statuses
+	WHERE panama_period_statuses.id = normalized_period_status
+    ) THEN
+	RAISE EXCEPTION 'fiscal period status does not exist'
+	    USING ERRCODE = 'P0001', DETAIL = 'PERIOD_STATUS_NOT_FOUND';
+    END IF;
+
+    PERFORM njord.ensure_standard_accounts(p_book_id, FALSE);
+
+    INSERT INTO public.panama_business_profiles (
+	book_id, legal_name, ruc, verification_digit, legal_form,
+	municipality, default_tax_policy_id, incorporated_on,
+	resident_agent, registered_address, operations_notice_number,
+	itbms_registered, conducts_lodging_activity, notes
+    ) VALUES (
+	p_book_id, normalized_legal_name, normalized_ruc,
+	NULLIF(btrim(p_verification_digit), ''), normalized_legal_form,
+	normalized_municipality, 'current_2026', p_incorporated_on,
+	NULLIF(btrim(p_resident_agent), ''),
+	NULLIF(btrim(p_registered_address), ''),
+	NULLIF(btrim(p_operations_notice_number), ''),
+	COALESCE(p_itbms_registered, FALSE),
+	COALESCE(p_conducts_lodging_activity, FALSE),
+	NULLIF(btrim(p_notes), '')
+    )
+    ON CONFLICT (book_id) DO UPDATE SET
+	legal_name = EXCLUDED.legal_name,
+	ruc = EXCLUDED.ruc,
+	verification_digit = EXCLUDED.verification_digit,
+	legal_form = EXCLUDED.legal_form,
+	municipality = EXCLUDED.municipality,
+	incorporated_on = EXCLUDED.incorporated_on,
+	resident_agent = EXCLUDED.resident_agent,
+	registered_address = EXCLUDED.registered_address,
+	operations_notice_number = EXCLUDED.operations_notice_number,
+	itbms_registered = EXCLUDED.itbms_registered,
+	conducts_lodging_activity = EXCLUDED.conducts_lodging_activity,
+	notes = EXCLUDED.notes;
+
+    INSERT INTO public.panama_fiscal_periods (
+	book_id, id, period_start, period_end, status, tax_policy_id,
+	income_tax_return_due_on, municipal_return_due_on, notes
+    ) VALUES (
+	p_book_id, normalized_period_id, p_period_start, p_period_end,
+	normalized_period_status, 'current_2026',
+	p_income_tax_return_due_on, p_municipal_return_due_on,
+	NULLIF(btrim(p_period_notes), '')
+    )
+    ON CONFLICT (book_id, id) DO UPDATE SET
+	period_start = EXCLUDED.period_start,
+	period_end = EXCLUDED.period_end,
+	status = EXCLUDED.status,
+	tax_policy_id = EXCLUDED.tax_policy_id,
+	income_tax_return_due_on = EXCLUDED.income_tax_return_due_on,
+	municipal_return_due_on = EXCLUDED.municipal_return_due_on,
+	notes = EXCLUDED.notes;
+
+    IF COALESCE(p_enable_residential_property, FALSE) THEN
+	INSERT INTO public.panama_residential_property_profiles (book_id)
+	VALUES (p_book_id)
+	ON CONFLICT (book_id) DO NOTHING;
+    ELSE
+	BEGIN
+	    DELETE FROM public.panama_residential_property_profiles
+	    WHERE book_id = p_book_id;
+	EXCEPTION WHEN foreign_key_violation THEN
+	    RAISE EXCEPTION 'residential-property records must be removed before disabling the extension'
+		USING ERRCODE = 'P0001',
+		      DETAIL = 'PANAMA_PROPERTY_EXTENSION_HAS_DATA';
+	END;
+    END IF;
+
+    RETURN QUERY SELECT * FROM api.book_page(p_book_id);
+END;
+$$;

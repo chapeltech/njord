@@ -2525,3 +2525,313 @@ COMMENT ON FUNCTION taiwan_report_rows(
     VARCHAR, VARCHAR, TIMESTAMP, TIMESTAMP, TIMESTAMP
 ) IS
     'Normalized Taiwan bookkeeping and injection-moulding report rows for the generic SQL-defined report page.';
+
+-- Taiwan settings are offered only to TWD books. SQL owns that eligibility,
+-- profile readiness, and the optional manufacturing seam.
+CREATE OR REPLACE FUNCTION api.taiwan_book_components(p_book_id VARCHAR)
+RETURNS SETOF api.page_component
+LANGUAGE SQL
+STABLE
+AS $$
+    WITH configuration AS (
+        SELECT
+            books.id AS book_id,
+            books.name AS book_name,
+            profile.book_id IS NOT NULL AS profile_enabled,
+            profile.legal_name,
+            profile.unified_business_number,
+            profile.legal_form,
+            profile.business_tax_frequency,
+            profile.uses_uniform_invoices,
+            profile.established_on,
+            profile.responsible_person,
+            profile.registered_address,
+            profile.tax_registration_notes,
+            profile.notes,
+            manufacturing.book_id IS NOT NULL AS manufacturing_enabled,
+            (SELECT count(*)::INTEGER FROM taiwan_inventory_items AS item
+             WHERE item.book_id = books.id) AS inventory_item_count,
+            EXISTS (
+                SELECT 1 FROM public.taiwan_fiscal_periods AS period
+                WHERE period.book_id = books.id
+            ) AS has_period
+        FROM books
+        JOIN book_entity_types AS entity_types
+          ON entity_types.id = books.entity_type
+        LEFT JOIN taiwan_business_profiles AS profile ON profile.book_id = books.id
+        LEFT JOIN taiwan_manufacturing_profiles AS manufacturing
+          ON manufacturing.book_id = books.id
+        WHERE books.id = p_book_id
+          AND entity_types.allows_business_packs
+          AND books.reporting_asset = 'TWD'
+    )
+    SELECT
+        'taiwan_business_profile'::VARCHAR,
+        13500::BIGINT,
+        configuration.book_id,
+        jsonb_build_object(
+            'enabled', configuration.profile_enabled,
+            'legal_name', COALESCE(configuration.legal_name, configuration.book_name),
+            'unified_business_number', COALESCE(configuration.unified_business_number, ''),
+            'legal_form', COALESCE(configuration.legal_form, 'limited_company'),
+            'business_tax_frequency', COALESCE(
+                configuration.business_tax_frequency, 'bimonthly'
+            ),
+            'uses_uniform_invoices', COALESCE(configuration.uses_uniform_invoices, TRUE),
+            'established_on', configuration.established_on,
+            'responsible_person', configuration.responsible_person,
+            'registered_address', configuration.registered_address,
+            'tax_registration_notes', configuration.tax_registration_notes,
+            'manufacturing_enabled', configuration.manufacturing_enabled,
+            'inventory_item_count', configuration.inventory_item_count,
+            'notes', configuration.notes
+        )
+    FROM configuration
+UNION ALL
+    SELECT
+        'configuration_check'::VARCHAR,
+        13600::BIGINT,
+        'taiwan_profile'::VARCHAR,
+        njord.configuration_check_payload(
+            'taiwan_profile',
+            'Taiwan business profile',
+            configuration.profile_enabled,
+            CASE WHEN configuration.profile_enabled THEN NULL
+                ELSE 'Save the Taiwan business settings to enable its working papers.' END
+        )
+    FROM configuration
+UNION ALL
+    SELECT
+        'configuration_check'::VARCHAR,
+        13601::BIGINT,
+        'taiwan_period'::VARCHAR,
+        njord.configuration_check_payload(
+            'taiwan_period',
+            'Fiscal period',
+            configuration.profile_enabled AND configuration.has_period,
+            CASE
+                WHEN NOT configuration.profile_enabled THEN 'Save the business profile first.'
+                WHEN NOT configuration.has_period THEN 'Add one fiscal period.'
+                ELSE NULL
+            END
+        )
+    FROM configuration
+UNION ALL
+    SELECT
+        'configuration_check'::VARCHAR,
+        13602::BIGINT,
+        'taiwan_manufacturing'::VARCHAR,
+        njord.configuration_check_payload(
+            'taiwan_manufacturing',
+            'Injection-moulding manufacturing extension',
+            configuration.manufacturing_enabled
+                AND configuration.inventory_item_count > 0,
+            CASE
+                WHEN NOT configuration.manufacturing_enabled THEN
+                    'Optional; enable it for production, stock, BOM, machine, and mould schedules.'
+                WHEN configuration.inventory_item_count = 0 THEN
+                    'Record inventory items before relying on manufacturing schedules.'
+                ELSE NULL
+            END
+        )
+    FROM configuration
+UNION ALL
+    SELECT
+        'taiwan_legal_form_option'::VARCHAR,
+        13700 + row_number() OVER (ORDER BY form.label, form.id),
+        form.id,
+        njord.labelled_option_payload(form.id, form.label)
+    FROM taiwan_legal_forms AS form
+    WHERE EXISTS (SELECT 1 FROM configuration)
+UNION ALL
+    SELECT
+        'taiwan_tax_frequency_option'::VARCHAR,
+        13800 + row_number() OVER (ORDER BY frequency.label, frequency.id),
+        frequency.id,
+        njord.labelled_option_payload(frequency.id, frequency.label)
+    FROM taiwan_business_tax_frequencies AS frequency
+    WHERE EXISTS (SELECT 1 FROM configuration)
+UNION ALL
+    SELECT
+        'taiwan_period_status_option'::VARCHAR,
+        13900 + row_number() OVER (ORDER BY status.label, status.id),
+        status.id,
+        njord.labelled_option_payload(status.id, status.label)
+    FROM taiwan_period_statuses AS status
+    WHERE EXISTS (SELECT 1 FROM configuration)
+UNION ALL
+    SELECT
+        'taiwan_fiscal_period'::VARCHAR,
+        14000 + row_number() OVER (ORDER BY period.period_start DESC, period.id),
+        period.id,
+        jsonb_build_object(
+            'id', period.id,
+            'period_start', period.period_start,
+            'period_end', period.period_end,
+            'status', period.status,
+            'annual_income_tax_due_on', period.annual_income_tax_due_on,
+            'provisional_income_tax_due_on', period.provisional_income_tax_due_on,
+            'undistributed_earnings_due_on', period.undistributed_earnings_due_on,
+            'notes', period.notes
+        )
+    FROM taiwan_fiscal_periods AS period
+    WHERE period.book_id = p_book_id;
+$$;
+
+-- Configure a compact Taiwan bookkeeping profile and an explicit fiscal
+-- period. The optional manufacturing marker unlocks production schedules; it
+-- does not invent inventory items, BOMs, tax obligations, or return figures.
+CREATE OR REPLACE FUNCTION api.configure_taiwan_business(
+    p_book_id VARCHAR,
+    p_legal_name VARCHAR,
+    p_unified_business_number VARCHAR,
+    p_legal_form VARCHAR,
+    p_business_tax_frequency VARCHAR,
+    p_period_id VARCHAR,
+    p_period_start DATE,
+    p_period_end DATE,
+    p_uses_uniform_invoices BOOLEAN DEFAULT TRUE,
+    p_enable_manufacturing BOOLEAN DEFAULT FALSE,
+    p_established_on DATE DEFAULT NULL,
+    p_responsible_person VARCHAR DEFAULT NULL,
+    p_registered_address VARCHAR DEFAULT NULL,
+    p_tax_registration_notes VARCHAR DEFAULT NULL,
+    p_notes VARCHAR DEFAULT NULL,
+    p_period_status VARCHAR DEFAULT 'open',
+    p_annual_income_tax_due_on DATE DEFAULT NULL,
+    p_provisional_income_tax_due_on DATE DEFAULT NULL,
+    p_undistributed_earnings_due_on DATE DEFAULT NULL,
+    p_period_notes VARCHAR DEFAULT NULL
+)
+RETURNS SETOF api.page_component
+LANGUAGE plpgsql
+VOLATILE
+AS $$
+DECLARE
+    normalized_legal_name VARCHAR := NULLIF(btrim(p_legal_name), '');
+    normalized_ubn VARCHAR := NULLIF(btrim(p_unified_business_number), '');
+    normalized_legal_form VARCHAR := NULLIF(btrim(p_legal_form), '');
+    normalized_frequency VARCHAR := NULLIF(btrim(p_business_tax_frequency), '');
+    normalized_period_id VARCHAR := NULLIF(btrim(p_period_id), '');
+    normalized_period_status VARCHAR := COALESCE(
+        NULLIF(btrim(p_period_status), ''), 'open'
+    );
+    reporting_asset VARCHAR;
+BEGIN
+    reporting_asset := njord.lock_book_reporting_asset(p_book_id);
+    IF reporting_asset <> 'TWD' THEN
+        RAISE EXCEPTION 'Taiwan business configuration requires a TWD book'
+            USING ERRCODE = 'P0001', DETAIL = 'TAIWAN_BUSINESS_REQUIRES_TWD';
+    END IF;
+    UPDATE public.books
+    SET entity_type = CASE
+	WHEN normalized_legal_form = 'sole_proprietorship' THEN 'sole_trader'
+	WHEN normalized_legal_form = 'partnership' THEN 'partnership'
+	ELSE 'company'
+    END
+    WHERE id = p_book_id AND entity_type = 'household';
+    IF normalized_legal_name IS NULL THEN
+        RAISE EXCEPTION 'business legal name is required'
+            USING ERRCODE = 'P0001', DETAIL = 'BUSINESS_LEGAL_NAME_REQUIRED';
+    END IF;
+    IF normalized_ubn IS NULL OR normalized_ubn !~ '^[0-9]{8}$' THEN
+        RAISE EXCEPTION 'Unified Business Number must contain eight digits'
+            USING ERRCODE = 'P0001', DETAIL = 'TAIWAN_UBN_INVALID';
+    END IF;
+    IF normalized_legal_form IS NULL OR NOT EXISTS (
+        SELECT 1 FROM taiwan_legal_forms WHERE id = normalized_legal_form
+    ) THEN
+        RAISE EXCEPTION 'Taiwan legal form does not exist'
+            USING ERRCODE = 'P0001', DETAIL = 'TAIWAN_LEGAL_FORM_NOT_FOUND';
+    END IF;
+    IF normalized_frequency IS NULL OR NOT EXISTS (
+        SELECT 1 FROM taiwan_business_tax_frequencies
+        WHERE id = normalized_frequency
+    ) THEN
+        RAISE EXCEPTION 'business-tax frequency does not exist'
+            USING ERRCODE = 'P0001', DETAIL = 'TAIWAN_TAX_FREQUENCY_NOT_FOUND';
+    END IF;
+    IF normalized_period_id IS NULL THEN
+        RAISE EXCEPTION 'fiscal period id is required'
+            USING ERRCODE = 'P0001', DETAIL = 'FISCAL_PERIOD_ID_REQUIRED';
+    END IF;
+    IF p_period_start IS NULL OR p_period_end IS NULL THEN
+        RAISE EXCEPTION 'fiscal period dates are required'
+            USING ERRCODE = 'P0001', DETAIL = 'FISCAL_PERIOD_DATES_REQUIRED';
+    END IF;
+    IF p_period_start > p_period_end THEN
+        RAISE EXCEPTION 'fiscal period starts after it ends'
+            USING ERRCODE = 'P0001', DETAIL = 'INVALID_FISCAL_PERIOD';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM taiwan_period_statuses WHERE id = normalized_period_status
+    ) THEN
+        RAISE EXCEPTION 'fiscal period status does not exist'
+            USING ERRCODE = 'P0001', DETAIL = 'PERIOD_STATUS_NOT_FOUND';
+    END IF;
+
+    PERFORM njord.ensure_standard_accounts(p_book_id, FALSE);
+
+    INSERT INTO taiwan_business_profiles (
+        book_id, legal_name, unified_business_number, legal_form,
+        business_tax_frequency, uses_uniform_invoices,
+        established_on, responsible_person, registered_address,
+        tax_registration_notes, notes
+    ) VALUES (
+        p_book_id, normalized_legal_name, normalized_ubn,
+        normalized_legal_form, normalized_frequency,
+        COALESCE(p_uses_uniform_invoices, TRUE), p_established_on,
+        NULLIF(btrim(p_responsible_person), ''),
+        NULLIF(btrim(p_registered_address), ''),
+        NULLIF(btrim(p_tax_registration_notes), ''),
+        NULLIF(btrim(p_notes), '')
+    )
+    ON CONFLICT (book_id) DO UPDATE SET
+        legal_name = EXCLUDED.legal_name,
+        unified_business_number = EXCLUDED.unified_business_number,
+        legal_form = EXCLUDED.legal_form,
+        business_tax_frequency = EXCLUDED.business_tax_frequency,
+        uses_uniform_invoices = EXCLUDED.uses_uniform_invoices,
+        established_on = EXCLUDED.established_on,
+        responsible_person = EXCLUDED.responsible_person,
+        registered_address = EXCLUDED.registered_address,
+        tax_registration_notes = EXCLUDED.tax_registration_notes,
+        notes = EXCLUDED.notes;
+
+    INSERT INTO taiwan_fiscal_periods (
+        book_id, id, period_start, period_end, status,
+        annual_income_tax_due_on, provisional_income_tax_due_on,
+        undistributed_earnings_due_on, notes
+    ) VALUES (
+        p_book_id, normalized_period_id, p_period_start, p_period_end,
+        normalized_period_status,
+        p_annual_income_tax_due_on, p_provisional_income_tax_due_on,
+        p_undistributed_earnings_due_on, NULLIF(btrim(p_period_notes), '')
+    )
+    ON CONFLICT (book_id, id) DO UPDATE SET
+        period_start = EXCLUDED.period_start,
+        period_end = EXCLUDED.period_end,
+        status = EXCLUDED.status,
+        annual_income_tax_due_on = EXCLUDED.annual_income_tax_due_on,
+        provisional_income_tax_due_on = EXCLUDED.provisional_income_tax_due_on,
+        undistributed_earnings_due_on = EXCLUDED.undistributed_earnings_due_on,
+        notes = EXCLUDED.notes;
+
+    IF COALESCE(p_enable_manufacturing, FALSE) THEN
+        INSERT INTO taiwan_manufacturing_profiles (book_id)
+        VALUES (p_book_id)
+        ON CONFLICT (book_id) DO NOTHING;
+    ELSE
+        BEGIN
+            DELETE FROM taiwan_manufacturing_profiles
+            WHERE book_id = p_book_id;
+        EXCEPTION WHEN foreign_key_violation THEN
+            RAISE EXCEPTION 'manufacturing records must be removed before disabling the extension'
+                USING ERRCODE = 'P0001',
+                      DETAIL = 'TAIWAN_MANUFACTURING_EXTENSION_HAS_DATA';
+        END;
+    END IF;
+
+    RETURN QUERY SELECT * FROM api.book_page(p_book_id);
+END;
+$$;

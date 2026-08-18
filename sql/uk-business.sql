@@ -1,5 +1,6 @@
 -- UK business reference data and preparation reports.
 --
+
 -- This production pack defines working papers and supporting schedules.  It
 -- does not submit returns or claim to produce filing-ready accounts.
 
@@ -2217,3 +2218,517 @@ END;
 $$;
 
 --
+
+-- One authoritative readiness predicate is shared by the Book page, catalogue
+-- discovery, and direct report routes.  A profile row alone is not enough:
+-- direct SQL may create partial development data, which must not expose a
+-- half-configured UK report surface.
+CREATE OR REPLACE FUNCTION njord.uk_company_configuration_complete(
+    p_book_id VARCHAR
+)
+RETURNS BOOLEAN
+LANGUAGE SQL
+STABLE
+AS $$
+    SELECT EXISTS (
+	SELECT 1
+	FROM public.uk_company_profiles AS profile
+	WHERE profile.book_id = p_book_id
+	  AND njord.standard_account_hierarchy_complete(profile.book_id)
+	  AND EXISTS (
+	    SELECT 1
+	    FROM public.uk_accounting_periods AS period
+	    WHERE period.book_id = profile.book_id
+	  )
+	  AND (
+	    profile.vat_scheme = 'not_registered'
+	    OR EXISTS (
+		SELECT 1
+		FROM public.uk_company_control_accounts AS control
+		WHERE control.book_id = profile.book_id
+	    )
+	  )
+    );
+$$;
+
+-- One pack-local projection feeds status, form fields, and setup checks. This
+-- keeps UK rules out of the generic Book-page compositor.
+CREATE OR REPLACE VIEW njord.uk_book_configuration AS
+SELECT
+    books.id AS book_id,
+    books.name AS book_name,
+    books.reporting_asset = 'GBP'
+	AND books.entity_type = 'company' AS available,
+    profiles.book_id IS NOT NULL AS profile_enabled,
+    profiles.legal_name,
+    profiles.company_number,
+    profiles.legal_form,
+    profiles.accounting_framework,
+    profiles.utr,
+    profiles.vat_registration_number,
+    profiles.vat_scheme,
+    profiles.registered_office,
+    profiles.incorporated_on,
+    profiles.notes,
+    EXISTS (
+	SELECT 1 FROM public.uk_accounting_periods AS period
+	WHERE period.book_id = books.id
+    ) AS has_period,
+    EXISTS (
+	SELECT 1 FROM public.uk_company_control_accounts AS control
+	WHERE control.book_id = books.id
+    ) AS has_vat_control,
+    njord.standard_account_hierarchy_complete(books.id)
+	AS has_standard_account_hierarchy,
+    njord.uk_company_configuration_complete(books.id)
+	AS configuration_complete
+FROM public.books
+LEFT JOIN public.uk_company_profiles AS profiles
+  ON profiles.book_id = books.id;
+
+CREATE OR REPLACE FUNCTION api.uk_book_status(p_book_id VARCHAR)
+RETURNS JSONB
+LANGUAGE SQL
+STABLE
+AS $$
+    SELECT jsonb_build_object(
+	'configuration_status', CASE
+	    WHEN NOT configuration.profile_enabled THEN 'ordinary'
+	    WHEN configuration.configuration_complete THEN 'complete'
+	    ELSE 'incomplete'
+	END,
+	'validation_messages', to_jsonb(array_remove(ARRAY[
+	    CASE WHEN configuration.profile_enabled
+		      AND NOT configuration.has_standard_account_hierarchy THEN
+		'Save company settings to create the standard account hierarchy.'
+	    END,
+	    CASE WHEN configuration.profile_enabled
+		      AND NOT configuration.has_period THEN
+		'Add at least one accounting period.'
+	    END,
+	    CASE WHEN configuration.profile_enabled
+		      AND configuration.vat_scheme <> 'not_registered'
+		      AND NOT configuration.has_vat_control THEN
+		'Select a posting liability account for VAT control.'
+	    END
+	]::TEXT[], NULL))
+    )
+    FROM njord.uk_book_configuration AS configuration
+    WHERE configuration.book_id = p_book_id;
+$$;
+
+CREATE OR REPLACE FUNCTION api.uk_book_components(p_book_id VARCHAR)
+RETURNS SETOF api.page_component
+LANGUAGE SQL
+STABLE
+AS $$
+    WITH configuration AS (
+	SELECT *
+	FROM njord.uk_book_configuration
+	WHERE book_id = p_book_id AND available
+    )
+    SELECT
+	'company_profile'::VARCHAR,
+	9200::BIGINT,
+	configuration.book_id,
+	jsonb_build_object(
+	    'enabled', configuration.profile_enabled,
+	    'legal_name', COALESCE(
+		configuration.legal_name, configuration.book_name
+	    ),
+	    'company_number', configuration.company_number,
+	    'legal_form', COALESCE(
+		configuration.legal_form, 'private_limited_shares'
+	    ),
+	    'accounting_framework', COALESCE(
+		configuration.accounting_framework, 'frs105'
+	    ),
+	    'utr', configuration.utr,
+	    'vat_registration_number', configuration.vat_registration_number,
+	    'vat_scheme', COALESCE(
+		configuration.vat_scheme, 'not_registered'
+	    ),
+	    'registered_office', configuration.registered_office,
+	    'incorporated_on', configuration.incorporated_on,
+	    'notes', configuration.notes
+	)
+    FROM configuration
+UNION ALL
+    SELECT
+	'configuration_check'::VARCHAR,
+	check_row.row_order,
+	check_row.id,
+	njord.configuration_check_payload(
+	    check_row.id, check_row.label,
+	    check_row.complete, check_row.message
+	)
+    FROM configuration
+    CROSS JOIN LATERAL (VALUES
+	(9300::BIGINT, 'account_hierarchy'::VARCHAR, 'Account hierarchy'::TEXT,
+	 configuration.has_standard_account_hierarchy,
+	 CASE
+	     WHEN configuration.has_standard_account_hierarchy THEN NULL
+	     WHEN configuration.profile_enabled THEN
+		 'Save company settings to create the standard account hierarchy.'
+	     ELSE
+		 'The standard account hierarchy will be created when company settings are saved.'
+	 END),
+	(9301, 'profile', 'Company profile', configuration.profile_enabled,
+	 CASE WHEN configuration.profile_enabled THEN NULL
+	     ELSE 'Enable UK company reporting to add a company profile.' END),
+	(9302, 'period', 'Accounting period',
+	 configuration.profile_enabled AND configuration.has_period,
+	 CASE
+	     WHEN NOT configuration.profile_enabled THEN
+		 'Enable UK company reporting first.'
+	     WHEN NOT configuration.has_period THEN
+		 'Add at least one accounting period.'
+	 END),
+	(9303, 'vat_control', 'VAT control account',
+	 configuration.profile_enabled AND (
+	     configuration.vat_scheme = 'not_registered'
+	     OR configuration.has_vat_control
+	 ),
+	 CASE
+	     WHEN NOT configuration.profile_enabled THEN
+		 'Enable UK company reporting first.'
+	     WHEN configuration.vat_scheme = 'not_registered' THEN
+		 'Not required while the company is not VAT registered.'
+	     WHEN NOT configuration.has_vat_control THEN
+		 'Select a posting liability account for VAT control.'
+	 END)
+    ) AS check_row(row_order, id, label, complete, message)
+UNION ALL
+    SELECT
+	options.component,
+	options.base_order + row_number() OVER (
+	    PARTITION BY options.component ORDER BY options.label, options.id
+	),
+	options.id,
+	njord.labelled_option_payload(options.id, options.label)
+    FROM configuration
+    CROSS JOIN LATERAL (
+	SELECT 'legal_form_option'::VARCHAR AS component,
+	       9400::BIGINT AS base_order, id, label
+	FROM public.uk_company_legal_forms
+	UNION ALL
+	SELECT 'accounting_framework_option', 9500, id, label
+	FROM public.uk_accounting_frameworks
+	UNION ALL
+	SELECT 'vat_scheme_option', 9600, id, label
+	FROM public.uk_vat_schemes
+	UNION ALL
+	SELECT 'period_status_option', 9700, id, label
+	FROM public.uk_period_statuses
+    ) AS options
+UNION ALL
+    SELECT
+	'accounting_period'::VARCHAR,
+	10000 + row_number() OVER (
+	    ORDER BY periods.period_start DESC, periods.id
+	),
+	periods.id,
+	jsonb_build_object(
+	    'id', periods.id,
+	    'period_start', periods.period_start,
+	    'period_end', periods.period_end,
+	    'status', periods.status,
+	    'accounts_due_on', periods.accounts_due_on,
+	    'corporation_tax_due_on', periods.corporation_tax_due_on,
+	    'accounts_filed_on', periods.accounts_filed_on,
+	    'ct600_filed_on', periods.ct600_filed_on,
+	    'notes', periods.notes
+	)
+    FROM public.uk_accounting_periods AS periods
+    WHERE periods.book_id = p_book_id
+UNION ALL
+    SELECT
+	'vat_control_account_option'::VARCHAR,
+	11000 + row_number() OVER (ORDER BY accounts.sort_path),
+	accounts.id,
+	jsonb_build_object(
+	    'id', accounts.id,
+	    'name', accounts.name,
+	    'path', accounts.display_path,
+	    'selected', EXISTS (
+		SELECT 1
+		FROM public.uk_company_control_accounts AS control
+		WHERE control.book_id = p_book_id
+		  AND control.vat_control_acct = accounts.id
+	    )
+	)
+    FROM public.report_account_tree AS accounts
+    JOIN public.books ON books.id = accounts.book_id
+    WHERE accounts.book_id = p_book_id
+      AND accounts.type = 'L'
+      AND NOT accounts.placeholder
+      AND accounts.atype = books.reporting_asset;
+$$;
+
+-- Enable or update a UK company in one statement-level transaction.  The UK
+-- report catalogue requires a profile, accounting period and any applicable
+-- VAT control mapping, so those parts must never be committed independently.
+CREATE OR REPLACE FUNCTION api.configure_uk_company(
+    p_book_id VARCHAR,
+    p_legal_name VARCHAR,
+    p_legal_form VARCHAR,
+    p_accounting_framework VARCHAR,
+    p_vat_scheme VARCHAR,
+    p_period_id VARCHAR,
+    p_period_start DATE,
+    p_period_end DATE,
+    p_vat_control_acct VARCHAR DEFAULT NULL,
+    p_company_number VARCHAR DEFAULT NULL,
+    p_utr VARCHAR DEFAULT NULL,
+    p_vat_registration_number VARCHAR DEFAULT NULL,
+    p_registered_office VARCHAR DEFAULT NULL,
+    p_incorporated_on DATE DEFAULT NULL,
+    p_notes VARCHAR DEFAULT NULL,
+    p_period_status VARCHAR DEFAULT 'open',
+    p_accounts_due_on DATE DEFAULT NULL,
+    p_corporation_tax_due_on DATE DEFAULT NULL,
+    p_accounts_filed_on DATE DEFAULT NULL,
+    p_ct600_filed_on DATE DEFAULT NULL,
+    p_period_notes VARCHAR DEFAULT NULL
+)
+RETURNS SETOF api.page_component
+LANGUAGE plpgsql
+VOLATILE
+AS $$
+DECLARE
+    normalized_legal_name VARCHAR := NULLIF(btrim(p_legal_name), '');
+    normalized_legal_form VARCHAR := NULLIF(btrim(p_legal_form), '');
+    normalized_framework VARCHAR := NULLIF(
+	btrim(p_accounting_framework), ''
+    );
+    normalized_vat_scheme VARCHAR := NULLIF(btrim(p_vat_scheme), '');
+    normalized_period_id VARCHAR := NULLIF(btrim(p_period_id), '');
+    normalized_period_status VARCHAR := COALESCE(
+	NULLIF(btrim(p_period_status), ''), 'open'
+    );
+    normalized_control VARCHAR := NULLIF(btrim(p_vat_control_acct), '');
+    reporting_asset VARCHAR;
+    selected_control VARCHAR;
+    candidate_id VARCHAR;
+    candidate_suffix INTEGER;
+BEGIN
+    reporting_asset := njord.lock_book_reporting_asset(p_book_id);
+
+    IF reporting_asset <> 'GBP' THEN
+	RAISE EXCEPTION 'UK company configuration requires a GBP book'
+	    USING ERRCODE = 'P0001', DETAIL = 'UK_COMPANY_REQUIRES_GBP';
+    END IF;
+
+    -- Calling this company-specific mutation is an explicit entity choice;
+    -- it is not an inference from the book name or reporting currency.
+    UPDATE public.books SET entity_type = 'company'
+    WHERE id = p_book_id AND entity_type = 'household';
+
+    IF normalized_legal_name IS NULL THEN
+	RAISE EXCEPTION 'company legal name is required'
+	    USING ERRCODE = 'P0001', DETAIL = 'COMPANY_LEGAL_NAME_REQUIRED';
+    END IF;
+
+    IF normalized_legal_form IS NULL OR NOT EXISTS (
+	SELECT 1
+	FROM public.uk_company_legal_forms
+	WHERE uk_company_legal_forms.id = normalized_legal_form
+    ) THEN
+	RAISE EXCEPTION 'company legal form does not exist'
+	    USING ERRCODE = 'P0001', DETAIL = 'LEGAL_FORM_NOT_FOUND';
+    END IF;
+
+    IF normalized_framework IS NULL OR NOT EXISTS (
+	SELECT 1
+	FROM public.uk_accounting_frameworks
+	WHERE uk_accounting_frameworks.id = normalized_framework
+    ) THEN
+	RAISE EXCEPTION 'accounting framework does not exist'
+	    USING ERRCODE = 'P0001', DETAIL = 'ACCOUNTING_FRAMEWORK_NOT_FOUND';
+    END IF;
+
+    IF normalized_vat_scheme IS NULL OR NOT EXISTS (
+	SELECT 1
+	FROM public.uk_vat_schemes
+	WHERE uk_vat_schemes.id = normalized_vat_scheme
+    ) THEN
+	RAISE EXCEPTION 'VAT scheme does not exist'
+	    USING ERRCODE = 'P0001', DETAIL = 'VAT_SCHEME_NOT_FOUND';
+    END IF;
+
+    IF normalized_period_id IS NULL THEN
+	RAISE EXCEPTION 'accounting period id is required'
+	    USING ERRCODE = 'P0001', DETAIL = 'ACCOUNTING_PERIOD_ID_REQUIRED';
+    END IF;
+
+    IF p_period_start IS NULL OR p_period_end IS NULL THEN
+	RAISE EXCEPTION 'accounting period dates are required'
+	    USING ERRCODE = 'P0001', DETAIL = 'ACCOUNTING_PERIOD_DATES_REQUIRED';
+    END IF;
+
+    IF p_period_start > p_period_end THEN
+	RAISE EXCEPTION 'accounting period starts after it ends'
+	    USING ERRCODE = 'P0001', DETAIL = 'INVALID_ACCOUNTING_PERIOD';
+    END IF;
+
+    IF NOT EXISTS (
+	SELECT 1
+	FROM public.uk_period_statuses
+	WHERE uk_period_statuses.id = normalized_period_status
+    ) THEN
+	RAISE EXCEPTION 'accounting period status does not exist'
+	    USING ERRCODE = 'P0001', DETAIL = 'PERIOD_STATUS_NOT_FOUND';
+    END IF;
+
+    -- Existing books may have been created without a chart.  The shared
+    -- bootstrap reuses compatible rows and rejects occupied hierarchy slots.
+    PERFORM njord.ensure_standard_accounts(p_book_id);
+
+    IF normalized_vat_scheme <> 'not_registered' THEN
+	IF normalized_control IS NOT NULL THEN
+	    SELECT accts.id
+	    INTO selected_control
+	    FROM public.accts
+	    WHERE accts.book_id = p_book_id
+	      AND accts.id = normalized_control
+	      AND accts.type = 'L'
+	      AND NOT accts.placeholder
+	      AND accts.atype = reporting_asset;
+
+	    IF NOT FOUND THEN
+		RAISE EXCEPTION 'VAT control account is not a posting GBP liability'
+		    USING ERRCODE = 'P0001',
+			  DETAIL = 'VAT_CONTROL_ACCOUNT_INVALID';
+	    END IF;
+	ELSE
+	    -- Reuse the current mapping first, then a conventional existing VAT
+	    -- Control account.  A fresh standard book has no posting liability,
+	    -- so create one beneath its Liabilities root when necessary.
+	    SELECT control.vat_control_acct
+	    INTO selected_control
+	    FROM public.uk_company_control_accounts AS control
+	    JOIN public.accts
+	      ON accts.book_id = control.book_id
+	     AND accts.id = control.vat_control_acct
+	    WHERE control.book_id = p_book_id
+	      AND accts.type = 'L'
+	      AND NOT accts.placeholder
+	      AND accts.atype = reporting_asset;
+
+	    IF NOT FOUND THEN
+		SELECT accts.id
+		INTO selected_control
+		FROM public.accts
+		WHERE accts.book_id = p_book_id
+		  AND accts.type = 'L'
+		  AND NOT accts.placeholder
+		  AND accts.atype = reporting_asset
+		  AND (
+		    lower(accts.id) = 'vat control'
+		    OR lower(accts.name) = 'vat control'
+		  )
+		ORDER BY (accts.id = 'VAT Control') DESC, accts.id
+		LIMIT 1;
+	    END IF;
+
+	    IF selected_control IS NULL THEN
+		candidate_id := 'VAT Control';
+		candidate_suffix := 2;
+		WHILE EXISTS (
+		    SELECT 1 FROM public.accts
+		    WHERE accts.book_id = p_book_id
+		      AND accts.id = candidate_id
+		) LOOP
+		    candidate_id := 'VAT Control ' || candidate_suffix;
+		    candidate_suffix := candidate_suffix + 1;
+		END LOOP;
+
+		INSERT INTO public.accts (
+		    book_id, id, name, type, atype, parent_id,
+		    account_kind, placeholder
+		) VALUES (
+		    p_book_id, candidate_id, 'VAT Control', 'L',
+		    reporting_asset, 'Liabilities', 'posting', FALSE
+		);
+		selected_control := candidate_id;
+	    END IF;
+	END IF;
+    END IF;
+
+    INSERT INTO public.uk_company_profiles (
+	book_id, legal_name, company_number, legal_form,
+	accounting_framework, utr, vat_registration_number, vat_scheme,
+	registered_office, incorporated_on, notes
+    ) VALUES (
+	p_book_id,
+	normalized_legal_name,
+	NULLIF(btrim(p_company_number), ''),
+	normalized_legal_form,
+	normalized_framework,
+	NULLIF(btrim(p_utr), ''),
+	NULLIF(btrim(p_vat_registration_number), ''),
+	normalized_vat_scheme,
+	NULLIF(btrim(p_registered_office), ''),
+	p_incorporated_on,
+	NULLIF(btrim(p_notes), '')
+    )
+    ON CONFLICT (book_id) DO UPDATE SET
+	legal_name = EXCLUDED.legal_name,
+	company_number = EXCLUDED.company_number,
+	legal_form = EXCLUDED.legal_form,
+	accounting_framework = EXCLUDED.accounting_framework,
+	utr = EXCLUDED.utr,
+	vat_registration_number = EXCLUDED.vat_registration_number,
+	vat_scheme = EXCLUDED.vat_scheme,
+	registered_office = EXCLUDED.registered_office,
+	incorporated_on = EXCLUDED.incorporated_on,
+	notes = EXCLUDED.notes;
+
+    INSERT INTO public.uk_accounting_periods (
+	book_id, id, period_start, period_end, status, accounts_due_on,
+	corporation_tax_due_on, accounts_filed_on, ct600_filed_on, notes
+    ) VALUES (
+	p_book_id,
+	normalized_period_id,
+	p_period_start,
+	p_period_end,
+	normalized_period_status,
+	p_accounts_due_on,
+	p_corporation_tax_due_on,
+	p_accounts_filed_on,
+	p_ct600_filed_on,
+	NULLIF(btrim(p_period_notes), '')
+    )
+    ON CONFLICT (book_id, id) DO UPDATE SET
+	period_start = EXCLUDED.period_start,
+	period_end = EXCLUDED.period_end,
+	status = EXCLUDED.status,
+	accounts_due_on = EXCLUDED.accounts_due_on,
+	corporation_tax_due_on = EXCLUDED.corporation_tax_due_on,
+	accounts_filed_on = EXCLUDED.accounts_filed_on,
+	ct600_filed_on = EXCLUDED.ct600_filed_on,
+	notes = EXCLUDED.notes;
+
+    IF normalized_vat_scheme = 'not_registered' THEN
+	DELETE FROM public.uk_company_control_accounts
+	WHERE uk_company_control_accounts.book_id = p_book_id;
+    ELSE
+	INSERT INTO public.uk_company_control_accounts (
+	    book_id, vat_control_acct
+	) VALUES (
+	    p_book_id, selected_control
+	)
+	ON CONFLICT (book_id) DO UPDATE SET
+	    vat_control_acct = EXCLUDED.vat_control_acct;
+    END IF;
+
+    RETURN QUERY SELECT * FROM api.book_page(p_book_id);
+END;
+$$;
+
+COMMENT ON FUNCTION api.configure_uk_company(
+    VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, DATE, DATE,
+    VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, DATE, VARCHAR, VARCHAR,
+    DATE, DATE, DATE, DATE, VARCHAR
+) IS
+    'Atomically ensure the standard hierarchy and configure a UK company profile, period, and required VAT control account';

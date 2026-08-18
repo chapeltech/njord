@@ -4,6 +4,7 @@
 \ir reference-data.sql
 \ir updating.sql
 \ir reports.sql
+\ir api-foundation.sql
 \ir uk-business.sql
 \ir panama.sql
 \ir taiwan.sql
