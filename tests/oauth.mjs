@@ -103,10 +103,7 @@ for (let index = 2; index < process.argv.length; index += 1) {
 }
 const script = basename(process.argv.at(-1));
 await appendFile(process.env.NJORD_FAKE_PSQL_LOG, JSON.stringify({ script, variables }) + "\\n");
-const responses = {
-  "authenticate-github-identity.sql": { principal_id: "11111111-1111-4111-8111-111111111111", database_role: "elric", identity_created: false },
-  "create-web-session.sql": { created: true }
-};
+const responses = {};
 if (!(script in responses)) process.exit(2);
 process.stdout.write(JSON.stringify(responses[script]) + "\\n");
 `);
