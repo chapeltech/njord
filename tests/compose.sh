@@ -31,7 +31,6 @@ cleanup()
 		$compose logs --no-color --tail 240 >&2 || true
 	fi
 	$compose down --volumes --remove-orphans >/dev/null 2>&1 || true
-	docker network rm "$network" >/dev/null 2>&1 || true
 	rm -f "$sentinel_env" "$sentinel_secret"
 	if [ "$created_secrets_directory" = true ]; then rmdir secrets >/dev/null 2>&1 || true; fi
 	rm -rf "$temporary"
@@ -53,7 +52,6 @@ export NJORD_IMAGE=$image
 export NJORD_INSTALL_EXAMPLES=0
 export NJORD_ALLOW_UNAUTHENTICATED=1
 
-docker network create "$network" >/dev/null
 case "${NJORD_COMPOSE_TEST_BUILD:-1}" in
 	0) ;;
 	1) docker build --tag "$image" . ;;

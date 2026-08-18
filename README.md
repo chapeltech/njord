@@ -21,7 +21,6 @@ Install Docker with Compose v2, then:
 
 ```sh
 cp .env.example .env
-docker network create njord-edge
 docker compose pull njord
 NJORD_INSTALL_EXAMPLES=1 NJORD_ALLOW_UNAUTHENTICATED=1 \
   docker compose up --no-build -d
@@ -54,13 +53,15 @@ Create three mode-0600 files under `secrets/`:
 - `session_secret`, containing 32 random bytes or more; and
 - `postgrest_jwt_secret`, containing 32 random bytes or more.
 
-Attach your HTTPS nginx service to `njord-edge`, proxy to
-`http://njord:8080`, and start Njord:
+Start authenticated Njord:
 
 ```sh
 docker compose -f docker-compose.yml -f compose.github.yaml pull njord
 docker compose -f docker-compose.yml -f compose.github.yaml up --no-build -d
 ```
+
+Njord creates the `njord-edge` network. Attach your HTTPS nginx service to it,
+proxy to `http://njord:8080`, and start nginx after Njord on the first run.
 
 The image is published as `ghcr.io/chapeltech/njord`. Pin a release tag or
 digest when storing real data.

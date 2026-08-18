@@ -31,7 +31,6 @@ cleanup()
 	fi
 	"${nginx_compose[@]}" down --remove-orphans >/dev/null 2>&1 || true
 	"${app_compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
-	docker network rm "$network" >/dev/null 2>&1 || true
 	rm -rf "$temporary"
 	exit "$status"
 }
@@ -58,7 +57,6 @@ export NJORD_PUBLIC_URL=https://accounts.test
 export NJORD_ADMIN_GITHUB_LOGIN=elric1
 export NJORD_DATABASE_ROLE=
 
-docker network create "$network" >/dev/null
 case "${NJORD_COMPOSE_OAUTH_TEST_BUILD:-1}" in
 	0) ;;
 	1) docker build --tag "$image" . ;;

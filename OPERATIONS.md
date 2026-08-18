@@ -71,8 +71,8 @@ version—not a fictional upgrade from an earlier release.
 2. Set `NJORD_IMAGE` in `.env` to the approved immutable image tag or digest,
    leave `NJORD_INSTALL_EXAMPLES=0`, and choose a durable
    `NJORD_DATA_VOLUME`. Do not rename that volume after initialization.
-3. Create the external Docker network and the three mode-0600 service secret
-   files. Secret values do not belong in `.env`:
+3. Create the three mode-0600 service secret files. Secret values do not belong
+   in `.env`:
 
    ```sh
    cp .env.example .env
@@ -83,18 +83,19 @@ version—not a fictional upgrade from an earlier release.
    # Write the GitHub OAuth App secret to secrets/github_client_secret.
    chmod 0600 secrets/github_client_secret secrets/session_secret \
      secrets/postgrest_jwt_secret
-   docker network create njord-edge
    ```
 
 4. Register the GitHub OAuth App exactly as described in
    [README.md](README.md#github-authentication). Set the matching external HTTPS
    origin in `NJORD_PUBLIC_URL`, the OAuth client id, and the lowercase initial
    administrator login in `.env`.
-5. Attach nginx to `NJORD_DOCKER_NETWORK`, adapt
+5. Njord creates `NJORD_DOCKER_NETWORK` when it starts. Configure nginx to
+   attach to that named network, adapt
    [deploy/nginx-njord.conf.example](deploy/nginx-njord.conf.example), and
    verify its upstream port agrees with `NJORD_HTTP_PORT`. Only nginx should
    publish a public port. PostgreSQL and PostgREST remain private to the
-   appliance.
+   appliance. On the first deployment, start nginx only after Njord has created
+   the network.
 6. Validate the rendered Compose model, pull the approved image, and start the
    authenticated overlay without rebuilding it on the server:
 

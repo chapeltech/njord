@@ -31,4 +31,3 @@ volumes:
 networks:
   default:
     name: ${NJORD_DOCKER_NETWORK:-njord-edge}
-    external: true

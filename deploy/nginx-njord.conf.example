@@ -8,9 +8,9 @@
 #
 # Include the access_log and location below in the existing HTTPS server for
 # NJORD_PUBLIC_URL.
-# Both Compose projects must join the external Docker network named by
-# NJORD_DOCKER_NETWORK. nginx owns TLS; Njord deliberately speaks plain HTTP
-# inside Docker.
+# Njord Compose creates the shared network named by NJORD_DOCKER_NETWORK; the
+# separately managed nginx Compose project joins it. nginx owns TLS; Njord
+# deliberately speaks plain HTTP inside Docker.
 # Apply the site's normal per-client connection and request limits here. Njord
 # deliberately ignores X-Forwarded-For for identity and redirect decisions, so
 # its built-in admission bounds protect the service globally rather than acting
