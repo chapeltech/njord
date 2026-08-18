@@ -27,11 +27,22 @@ has ordinary stable names such as `accounts`, `transactions`, `postings`,
 The control database contains only cluster-wide facts: principals, the global
 administrator grant, the Book catalogue, Book membership, supported initial
 denominations, provisioning state, and navigation discovery. It contains no
-ledger postings. A Book
-database contains exactly one `books` settings row and all accounting and
-report-pack data for that Book. The Book handle must equal
+ledger postings. `sql/control.sql` is only the ordered loader for the shared
+presentation definitions and the `control-schema.sql`, `control-roles.sql`,
+`auth.sql`, `control-gateway.sql`, `control-pages.sql`, and
+`control-lifecycle.sql` modules. A Book database contains exactly one `books`
+settings row and all accounting and report-pack data for that Book. The Book
+handle must equal
 `current_database()`; an insert/update trigger preserves that invariant, and
 the primary key therefore makes a second Book impossible.
+
+`sql/njord.sql` loads the generic ledger and reports, then
+`api-foundation.sql`, the jurisdiction packs, and finally the generic
+`api.sql` compositor. The foundation contains only the shared page type and
+helpers that a pack needs. Each pack owns its schema, reference data, reports,
+Book-page components, readiness rules, and configuration mutation in one SQL
+file; generic API code may compose those contracts but must not absorb their
+jurisdiction-specific fields or policy.
 
 The Book database is authoritative for its display name, entity type,
 reporting-currency history, and archive state. The matching control-catalogue
